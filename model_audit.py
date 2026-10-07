@@ -656,27 +656,34 @@ def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None):
     rep.add("CRIT", "file", f"bad magic {magic!r} — not a GGUF or safetensors file")
 
 def blob_identity(A, B):
-    """Match weight blobs across formats by (shape, SHA-256).
+    """Match weight blobs across formats by content (SHA-256), as a multiset.
 
     Tensor *names* differ between formats (model.layers.0.self_attn.q_proj vs
-    blk.0.attn_q), so names cannot carry a cross-format comparison. Shape plus
-    content can: if a blob in B is byte-identical to a blob in A, that weight
-    survived the conversion unchanged. Returns (matched, total_in_b, unmatched_names).
+    blk.0.attn_q), and so can tensor *shapes*: ggml stores 2-D dims in the opposite
+    order, so the same weights can read as [4096, 11008] on one side and
+    [11008, 4096] on the other. Bytes do not lie about content, so the match keys on
+    the hash alone — shape is reported separately, as corroboration.
+
+    Returns (matched, total_in_b, shape_agreement, unmatched_names).
     """
-    shapes_a = A.get("shapes") or {}
     counts_a = {}
     for name, h in A["tensors"].items():
-        counts_a[(tuple(shapes_a.get(name, [])), h)] = counts_a.get((tuple(shapes_a.get(name, [])), h), 0) + 1
+        counts_a[h] = counts_a.get(h, 0) + 1
+    shapes_a = A.get("shapes") or {}
+    shape_keys_a = {}
+    for name, h in A["tensors"].items():
+        shape_keys_a.setdefault(h, set()).add(tuple(sorted(shapes_a.get(name, []))))
     shapes_b = B.get("shapes") or {}
-    matched, unmatched = 0, []
+    matched, shape_ok, unmatched = 0, 0, []
     for name, h in B["tensors"].items():
-        key = (tuple(shapes_b.get(name, [])), h)
-        if counts_a.get(key, 0) > 0:
-            counts_a[key] -= 1
+        if counts_a.get(h, 0) > 0:
+            counts_a[h] -= 1
             matched += 1
+            if tuple(sorted(shapes_b.get(name, []))) in shape_keys_a.get(h, set()):
+                shape_ok += 1
         else:
             unmatched.append(name)
-    return matched, len(B["tensors"]), sorted(unmatched)
+    return matched, len(B["tensors"]), shape_ok, sorted(unmatched)
 
 
 def diff_baselines(file_a, file_b, rep):
@@ -697,11 +704,11 @@ def diff_baselines(file_a, file_b, rep):
                                 f"below instead")
         rep.add("INFO", "diff", f"name sets: {len(only_a)} only in A, {len(only_b)} only in B, "
                                 f"{len(set(ta) & set(tb))} in common (per-name listing skipped for cross-format)")
-        matched, total, unmatched = blob_identity(A, B)
+        matched, total, shape_ok, unmatched = blob_identity(A, B)
         if total and matched == total:
             rep.add("OK", "diff", f"content match: all {total} weight blobs in B are byte-identical "
-                                  f"(shape + SHA-256) to blobs in A — consistent with a lossless conversion "
-                                  f"of the same weights (naming changed, values did not)")
+                                  f"(SHA-256) to blobs in A — consistent with a lossless conversion of the "
+                                  f"same weights (naming changed, values did not)")
         else:
             rep.add("INFO", "diff", f"content match: {matched} of {total} weight blobs in B are byte-identical "
                                     f"to blobs in A; {len(unmatched)} differ. Quantized formats transform "
@@ -711,6 +718,10 @@ def diff_baselines(file_a, file_b, rep):
                 rep.add("INFO", "diff", f"not matched: {name}")
             if len(unmatched) > 8:
                 rep.add("INFO", "diff", f"… and {len(unmatched) - 8} more unmatched blobs")
+        if matched:
+            rep.add("INFO", "diff", f"shape agreement: {shape_ok} of the {matched} matched blobs also agree on "
+                                    f"shape (dimension order differs between formats, so this compares dims "
+                                    f"as a set)")
         return
     same = len(set(ta) & set(tb)) - len(changed)
     for k in only_a:

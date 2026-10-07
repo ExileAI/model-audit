@@ -329,6 +329,17 @@ class TestCrossFormatDiff(unittest.TestCase):
         self.assertFalse([m for m in msgs(rep, "WARN") if "tensor only in" in m],
                          "cross-format diff emitted a per-tensor warning flood")
 
+    def test_transposed_dims_still_match_by_content(self):
+        """ggml stores 2-D dims reversed: shape must not gate a byte-identical match."""
+        st = self.baseline("a.json", "safetensors", {"model.layers.0.mlp.up_proj.weight": "d" * 64},
+                           {"model.layers.0.mlp.up_proj.weight": [4096, 11008]})
+        gg = self.baseline("b.json", "gguf", {"blk.0.ffn_up.weight": "d" * 64},
+                           {"blk.0.ffn_up.weight": [11008, 4096]})
+        rep = self.run_diff(st, gg)
+        self.assertTrue(any(m.startswith("content match: all 1 weight blob") for m in msgs(rep, "OK")),
+                        "a lossless conversion with reversed dims was not matched by content")
+        self.assertTrue(any("shape agreement: 1 of the 1" in m for m in msgs(rep, "INFO")))
+
     def test_same_format_diff_still_classifies_changes(self):
         a = self.baseline("a.json", "gguf", {"blk.0.ffn_down.weight": "a" * 64},
                           {"blk.0.ffn_down.weight": [10, 1]})
