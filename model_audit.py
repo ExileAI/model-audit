@@ -113,7 +113,25 @@ def scan_template(tpl, rep):
             sev = "INFO" if label.endswith("wording") and "tool" in code_only[max(0,m.start()-200):m.start()+200].lower() else "WARN"
             rep.add(sev, "template", f"{label}: ...{ctx}...")
     # structural surprise: template doing arithmetic/loops over non-message vars
+    # Macro parameters, loop targets and {% set %} names are locally bound — a real
+    # 300-line tool-calling template otherwise produces nothing but this INFO noise,
+    # and INFO noise is how users learn to ignore a scanner.
+    locals_ = set()
+    for params in re.findall(r"\{%-?\s*macro\s+\w+\s*\(([^)]*)\)", tpl):
+        for p in params.split(","):
+            p = p.split("=")[0].strip()
+            if p.isidentifier():
+                locals_.add(p)
+    for target in re.findall(r"\{%-?\s*for\s+(.+?)\s+in\s", tpl):
+        for v in target.split(","):
+            v = v.strip()
+            if v.isidentifier():
+                locals_.add(v)
+    locals_.update(re.findall(r"\{%-?\s*set\s+(\w+)", tpl))
+    locals_.update(re.findall(r"\{%-?\s*macro\s+(\w+)", tpl))  # macros the template defines itself
     for var in set(re.findall(r"\{\{\s*([a-zA-Z_][\w\.]*)", tpl)):
+        if var.split(".")[0] in locals_:
+            continue
         if var.split(".")[0] not in {
             "messages", "bos_token", "eos_token", "add_generation_prompt",
             "system_message", "system_prompt", "tools", "documents", "prompt",
@@ -508,9 +526,12 @@ def dump_tensor_hashes(tensors, path):
     return out
 
 def write_baseline(tensors, path, sha, fmt, rep):
-    hashes = dump_tensor_hashes(tensors, path)
+    hashes, shapes = dump_tensor_hashes(tensors, path), {}
+    for t in tensors:
+        shapes[t.name] = [int(d) for d in t.shape]
     outp = path.with_suffix(path.suffix + ".tensorhashes.json")
-    outp.write_text(json.dumps({"file_sha256": sha, "format": fmt, "tensors": hashes}, indent=1))
+    outp.write_text(json.dumps({"file_sha256": sha, "format": fmt,
+                                "shapes": shapes, "tensors": hashes}, indent=1))
     rep.add("OK", "baseline", f"per-tensor SHA-256 written to {outp}")
 
 # ---------------- main ----------------
@@ -586,6 +607,30 @@ def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None):
         return _audit_st(path, rep, sha, size, do_hashes, hf_repo, hf_revision)
     rep.add("CRIT", "file", f"bad magic {magic!r} — not a GGUF or safetensors file")
 
+def blob_identity(A, B):
+    """Match weight blobs across formats by (shape, SHA-256).
+
+    Tensor *names* differ between formats (model.layers.0.self_attn.q_proj vs
+    blk.0.attn_q), so names cannot carry a cross-format comparison. Shape plus
+    content can: if a blob in B is byte-identical to a blob in A, that weight
+    survived the conversion unchanged. Returns (matched, total_in_b, unmatched_names).
+    """
+    shapes_a = A.get("shapes") or {}
+    counts_a = {}
+    for name, h in A["tensors"].items():
+        counts_a[(tuple(shapes_a.get(name, [])), h)] = counts_a.get((tuple(shapes_a.get(name, [])), h), 0) + 1
+    shapes_b = B.get("shapes") or {}
+    matched, unmatched = 0, []
+    for name, h in B["tensors"].items():
+        key = (tuple(shapes_b.get(name, [])), h)
+        if counts_a.get(key, 0) > 0:
+            counts_a[key] -= 1
+            matched += 1
+        else:
+            unmatched.append(name)
+    return matched, len(B["tensors"]), sorted(unmatched)
+
+
 def diff_baselines(file_a, file_b, rep):
     """Compare two .tensorhashes.json baselines of the same base model."""
     A = json.loads(Path(file_a).read_text())
@@ -593,15 +638,32 @@ def diff_baselines(file_a, file_b, rep):
     ta, tb = A["tensors"], B["tensors"]
     rep.add("INFO", "diff", f"A: {file_a} (file sha {A.get('file_sha256','?')[:16]}…)")
     rep.add("INFO", "diff", f"B: {file_b} (file sha {B.get('file_sha256','?')[:16]}…)")
-    fa, fb = A.get("format", "?"), B.get("format", "?")
-    if fa != fb:
-        rep.add("WARN", "diff", f"comparing a {fa} baseline with a {fb} one — tensor names and precision "
-                                f"differ between formats, so every difference below is expected and the "
-                                f"classification is not meaningful. Compare like with like, or use this only "
-                                f"to confirm that a conversion preserved individual tensors")
     only_a = sorted(set(ta) - set(tb))
     only_b = sorted(set(tb) - set(ta))
     changed = sorted(k for k in set(ta) & set(tb) if ta[k] != tb[k])
+    fa, fb = A.get("format", "?"), B.get("format", "?")
+    if fa != fb:
+        rep.add("WARN", "diff", f"comparing a {fa} baseline with a {fb} one — names and precision differ "
+                                f"between formats, so a per-name comparison is not meaningful and the "
+                                f"abliteration/re-training classification is skipped. Use the content match "
+                                f"below instead")
+        rep.add("INFO", "diff", f"name sets: {len(only_a)} only in A, {len(only_b)} only in B, "
+                                f"{len(set(ta) & set(tb))} in common (per-name listing skipped for cross-format)")
+        matched, total, unmatched = blob_identity(A, B)
+        if total and matched == total:
+            rep.add("OK", "diff", f"content match: all {total} weight blobs in B are byte-identical "
+                                  f"(shape + SHA-256) to blobs in A — consistent with a lossless conversion "
+                                  f"of the same weights (naming changed, values did not)")
+        else:
+            rep.add("INFO", "diff", f"content match: {matched} of {total} weight blobs in B are byte-identical "
+                                    f"to blobs in A; {len(unmatched)} differ. Quantized formats transform "
+                                    f"values by design, so a low count means 'not comparable this way', not "
+                                    f"'tampered' — only a lossless conversion is expected to match")
+            for name in unmatched[:8]:
+                rep.add("INFO", "diff", f"not matched: {name}")
+            if len(unmatched) > 8:
+                rep.add("INFO", "diff", f"… and {len(unmatched) - 8} more unmatched blobs")
+        return
     same = len(set(ta) & set(tb)) - len(changed)
     for k in only_a:
         rep.add("WARN", "diff", f"tensor only in A (removed in B): {k}")

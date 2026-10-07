@@ -279,5 +279,65 @@ class TestIndexConsistency(SAFETENSORS_BASE):
                         "a tensor added after indexing went unreported")
 
 
+class TestCrossFormatDiff(unittest.TestCase):
+    """GGUF and safetensors name the same weights differently, so a per-name diff is
+    not meaningful across formats. The content match must carry it instead — and it
+    must never emit the 'different model' CRIT for a legitimate conversion."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="model-audit-diff-")
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def baseline(self, name, fmt, tensors, shapes):
+        p = self.dir / name
+        p.write_text(json.dumps({"file_sha256": "0" * 64, "format": fmt,
+                                 "shapes": shapes, "tensors": tensors}))
+        return str(p)
+
+    def run_diff(self, a, b):
+        from model_audit import diff_baselines
+        rep = Report()
+        with contextlib.redirect_stdout(io.StringIO()):
+            diff_baselines(a, b, rep)
+        return rep
+
+    def test_lossless_conversion_matches_every_blob_by_content(self):
+        h = {f"t{i}": hashlib.sha256(bytes([i]) * 8).hexdigest() for i in range(3)}
+        st = self.baseline("a.json", "safetensors", {f"model.layers.{i}.self_attn.q_proj.weight": v
+                                                     for i, v in enumerate(h.values())},
+                           {f"model.layers.{i}.self_attn.q_proj.weight": [8, 1] for i in range(3)})
+        gg = self.baseline("b.json", "gguf", {f"blk.{i}.attn_q.weight": v for i, v in enumerate(h.values())},
+                           {f"blk.{i}.attn_q.weight": [8, 1] for i in range(3)})
+        rep = self.run_diff(st, gg)
+        self.assertTrue(any(m.startswith("content match: all 3 weight blobs") for m in msgs(rep, "OK")),
+                        "a lossless conversion was not recognised as content-identical")
+        self.assertEqual(msgs(rep, "CRIT"), [], "legitimate cross-format conversion raised CRIT")
+
+    def test_quantized_conversion_does_not_cry_wolf(self):
+        st = self.baseline("a.json", "safetensors", {f"model.layers.{i}.mlp.down_proj.weight":
+                            hashlib.sha256(b"fp%i" % i).hexdigest() for i in range(4)},
+                           {f"model.layers.{i}.mlp.down_proj.weight": [4096, 11008] for i in range(4)})
+        gg = self.baseline("b.json", "gguf", {f"blk.{i}.ffn_down.weight": hashlib.sha256(b"q4k%i" % i).hexdigest()
+                                              for i in range(4)},
+                           {f"blk.{i}.ffn_down.weight": [4096, 43] for i in range(4)})
+        rep = self.run_diff(st, gg)
+        self.assertEqual(msgs(rep, "CRIT"), [], "a quantized conversion produced a false critical")
+        self.assertTrue(any("content match: 0 of 4" in m for m in msgs(rep, "INFO")))
+        self.assertFalse([m for m in msgs(rep, "WARN") if "tensor only in" in m],
+                         "cross-format diff emitted a per-tensor warning flood")
+
+    def test_same_format_diff_still_classifies_changes(self):
+        a = self.baseline("a.json", "gguf", {"blk.0.ffn_down.weight": "a" * 64},
+                          {"blk.0.ffn_down.weight": [10, 1]})
+        b = self.baseline("b.json", "gguf", {"blk.0.ffn_down.weight": "b" * 64},
+                          {"blk.0.ffn_down.weight": [10, 1]})
+        rep = self.run_diff(a, b)
+        self.assertTrue(any("TENSOR CONTENT CHANGED" in m for m in msgs(rep, "CRIT")),
+                        "same-format content change must stay critical")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

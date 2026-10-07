@@ -76,5 +76,31 @@ class TestScannerCore(unittest.TestCase):
         rep = run_scanner("{{ m['content'] }}\u200b\u200c")
         self.assertTrue(any(s == "CRIT" and "zero-width" in m for s, _, m in rep.items))
 
+class TestTemplateLocalScope(unittest.TestCase):
+    """A real 300-line tool-calling template defines macros, loops and sets; its own
+    locals are not 'non-standard variables'. INFO noise is how users learn to ignore a
+    scanner, so locally bound names must be skipped — without weakening the check."""
+
+    MACRO_TEMPLATE = """{%- macro format_params(properties, required, filter_keys=false) -%}
+    {%- set ns = namespace(found_first=false) -%}
+    {%- for key, value in properties | dictsort -%}
+        {%- if value['type'] | upper == 'STRING' -%}{{ key }}:{{ value['type'] | upper }}{%- endif -%}
+    {%- endfor -%}
+    {{ format_arg(ns, key) }}
+{%- endmacro -%}
+{%- macro format_arg(ns, arg) -%}{{ arg }}{%- endmacro -%}
+{%- for m in messages -%}{{ m['role'] }}: {{ m['content'] }}{%- endfor -%}
+"""
+
+    def test_macro_locals_do_not_produce_info_noise(self):
+        rep = run_scanner(self.MACRO_TEMPLATE)
+        noise = [m for s, _, m in rep.items if "non-standard variable" in m]
+        self.assertEqual(noise, [], f"locally bound names flagged as non-standard: {noise}")
+
+    def test_undefined_variable_is_still_reported(self):
+        rep = run_scanner("{%- for m in messages -%}{{ m['content'] }}{%- endfor -%}{{ smuggled_globals }}")
+        self.assertTrue(any("non-standard variable: smuggled_globals" in m for s, _, m in rep.items),
+                        "an undefined referenced variable must still be reported")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
