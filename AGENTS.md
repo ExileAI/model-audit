@@ -64,4 +64,4 @@ entry in test_scanner.py, confirm benign tests still pass.
 
 - Python stdlib + `gguf` + `huggingface_hub` only. No new deps without discussion.
 - No generated artifacts in commits (reports/, baselines/, *.tensorhashes.json).
-- Attribution: Exile. MIT license.
+- Attribution: ExileAI. MIT license.

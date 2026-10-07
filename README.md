@@ -58,4 +58,4 @@ python3 report.py <file1.gguf> <file2.gguf>
 
 ---
 
-**model-audit** — created by Exile, 2026. MIT licensed.
+**model-audit** — created by ExileAI, 2026. MIT licensed.
