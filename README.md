@@ -11,11 +11,14 @@ first bytes; no flag, no library needed for safetensors (stdlib only). (Renamed 
 ## Layout
 - `model_audit.py` — core scanner (CLI, scriptable, exit codes 0/1/2)
 - `report.py` — human-readable HTML report generator (plain language, for non-technical users)
-- `reports/` — generated audit reports (HTML + JSON)
 - `templates/benign/` — honest reference templates
 - `templates/tampered/` — attack specimens (documentation only — never install)
-- `baselines/` — per-tensor fingerprint baselines for comparison
-- `docs/` — write-ups
+- `tests/test_scanner.py` — chat-template scanner specimens
+- `tests/test_safetensors.py` — structural specimens, synthesized byte by byte
+- `docs/limitations.md` — what the audit can and cannot prove (read before changing claims)
+- `docs/safe-workflow.md` — the download → pin → audit → baseline recipe
+- `reports/` — generated audit reports (HTML + JSON); gitignored, never commit
+- `baselines/` — per-tensor fingerprint baselines for comparison; gitignored
 
 ## Usage
 ```bash
@@ -34,6 +37,12 @@ for f in /path/to/models/*/*.gguf; do python3 model_audit.py "$f"; done
 
 # compare two tensor-fingerprint baselines (see docs/safe-workflow.md)
 python3 model_audit.py --diff model.old.json model.new.json
+
+# did this build come from that source tree? audit both, then compare across formats
+python3 model_audit.py <model.safetensors> --tensor-hashes    # the source
+python3 model_audit.py <model-Q8_0.gguf> --tensor-hashes      # the derived build
+python3 model_audit.py --diff <model.safetensors>.tensorhashes.json \
+                             <model-Q8_0.gguf>.tensorhashes.json
 
 # human-readable HTML report (one per file, plain language)
 python3 report.py <file1> <file2>
@@ -61,6 +70,15 @@ python3 report.py <file1> <file2>
   with itself proves consistency, not safety — the weights themselves are still unaudited.
 - Per-tensor hashes catch: swapped or edited weight blocks **when compared against a
   trusted baseline of the same base model**.
+- A baseline also answers one provenance question directly: whether a conversion was
+  lossless. A source → derived pair matches on byte-identical blobs *and* on value-identical
+  blobs (a converter upcasting bf16 norms to f32 preserves the numbers, not the bytes), so
+  `--diff` can show a build carries the same weights as a tree you audited — and it says
+  outright when a comparison is not meaningful (block-quantized weights).
+- A shipped checksum list (`MANIFEST.txt`, `SHA256SUMS`) is checked against the file, in both
+  directions: agreement is internal consistency, a mismatch under the file's own name is a
+  red flag, and the hash appearing under a *different* name means the file was renamed
+  without its contents changing.
 - NOTHING here can prove weights are benign in isolation. Hashes prove consistency,
   not safety. The gold standard remains: quantize yourself from a source you trust.
 

@@ -54,6 +54,27 @@ sha256sum model.safetensors *.jinja tokenizer_config.json config.json > SIDECARS
 The audit already scans every one of those templates for hostile content — but the
 hash is what lets you prove later that the file you read is still the file in place.
 
+### 2c. If you have the source tree, prove the conversion
+
+When a build ships both the fp/bf16 source and a converted GGUF, fingerprint both and
+compare across formats:
+
+```bash
+python3 model_audit.py model.safetensors --tensor-hashes
+python3 model_audit.py model-Q8_0.gguf   --tensor-hashes
+python3 model_audit.py --diff model.safetensors.tensorhashes.json model-Q8_0.gguf.tensorhashes.json
+```
+
+- A **lossless** conversion matches on every blob: byte-identical where the container type
+  is the same, and value-identical where the converter changed only the storage type (bf16
+  norms widened to f32 keep their numbers exactly). That is the strongest statement this
+  tool can make about provenance: the build carries the weights of a tree you audited.
+- A **quantized** build matches only on the tensors quantization leaves untouched (usually
+  the norms). The rest is reported as "not comparable this way" — quantization transforms
+  values by design, so that is not a red flag.
+- Names differ between formats (`blk.0.attn_q` vs `model.layers.0.self_attn.q_proj`) and so
+  can dimension order; the comparison matches by content for exactly that reason.
+
 ## 3. Whenever you re-download or copy the model
 
 Re-run both commands. The `--tensor-hashes` JSON now pays off:
