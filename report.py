@@ -1,11 +1,11 @@
 """
 report.py — human-friendly HTML report generator for model_audit results.
 
-Point it at one or more GGUF files; it runs the full audit and writes a
-plain-language HTML report (plus machine-readable JSON) to reports/.
+Point it at one or more model files (GGUF or safetensors); it runs the full audit
+and writes a plain-language HTML report (plus machine-readable JSON) to reports/.
 
 Usage:
-    python3 report.py <file1.gguf> [file2.gguf ...] [-o reports/]
+    python3 report.py <file1> [file2 ...] [-o reports/]
 """
 import argparse, json, sys, html
 from pathlib import Path
@@ -56,8 +56,61 @@ PLAIN = {
     "references non-standard variable": "The template uses a variable that isn't part of the standard chat "
         "vocabulary — usually fine (tool-calling), occasionally interesting.",
     "references non-standard variable: messages_json": "",
-    "ffn_down tensors present": "Weight-block census recorded — useful as a baseline for comparing builds.",
+    "tensors sit at common abliteration edit sites": "Weight-block census recorded — these are the layers "
+        "abliteration edits, so they are what to diff against a trusted build of the same base.",
     "no GGUF named": "The repo doesn't contain a file by this name anymore — it may have been replaced.",
+    # --- safetensors ---
+    "header unreadable": "The file's own header is broken: it claims a size that cannot be true for this "
+        "file. That is either a corrupt download or a fabricated file — nothing about it can be trusted.",
+    "header invalid": "The header is not the JSON structure safetensors requires. This file is not a valid "
+        "safetensors file, whatever its name says.",
+    "no tensors declared": "The header describes no weights at all — an empty or stripped file.",
+    "tensor entry missing dtype/shape/data_offsets": "A weight entry in the header is missing the fields "
+        "that describe it. The file cannot be read reliably.",
+    "tensor entry has malformed data_offsets": "A weight entry points at its data with invalid numbers — "
+        "the file's internal map is broken.",
+    "tensor entry has nonsensical offsets": "A weight entry declares an impossible data range (it ends "
+        "before it starts, or starts before zero).",
+    "tensor size:": "A weight block's declared size does not match what its type and shape require. The "
+        "header contradicts itself, which is what a hand-edited or grafted file looks like.",
+    "tensor layout:": "Two weight blocks claim the same bytes — the file's layout is not a valid "
+        "safetensors layout.",
+    "undeclared gap": "There is a stretch of data inside the file that no header entry claims. It could be "
+        "harmless padding from an unusual writer, or a region hidden from any structural review.",
+    "trailing data": "There are bytes after the last declared weight. Nothing in the header accounts for "
+        "them: appended data is invisible to anyone who only checks the weights.",
+    "is empty": "A weight block is empty — the file is likely broken or was modified.",
+    "dtype is not a known type": "A weight declares a data type this tool does not recognize, so its size "
+        "cannot be verified.",
+    "no config.json in this directory": "There is no config beside this file. The model's claimed identity "
+        "and provenance live in sidecar files, and none are here — treat the file as unnamed.",
+    "config.json present but unreadable": "A config file is here but cannot be parsed.",
+    "auto_map": "The config tells loaders to run Python code shipped by the uploader. If you load this "
+        "model with 'trust remote code' enabled, that code runs on your machine — a completely separate "
+        "supply chain from the weights. Only proceed if you trust the uploader and have read that code.",
+    "quantization_config": "The config says these weights are quantized rather than raw. That is fine, but "
+        "the claim comes from the uploader — nothing here verifies how they were made.",
+    "index mismatch": "The index file that describes a multi-shard model disagrees with this shard: it "
+        "lists weights that are not here, or misses weights that are. Shards and index must match exactly.",
+    "template sidecar": "This template file sits next to the weights and is what actually shapes the "
+        "conversation. A slow, careful review of this one small file covers the same attack surface as "
+        "reviewing the whole model.",
+    "no chat template sidecar": "This format never carries the chat template inside the file, and no "
+        "template sidecar is present. Whatever you load the model with supplies the template, so its "
+        "behavior is not pinned by anything you audited here.",
+    "both a chat_template.jinja": "Two different templates ship in the same folder. Which one a given app "
+        "uses is a runtime detail, so you cannot tell from the files alone how the model will behave.",
+    "__metadata__": "Free-form notes the uploader put in the header. They are self-reported and prove "
+        "nothing, but they often name the tool and the source the file came from.",
+    "the gguf python package is not installed": "GGUF files need a small helper library that is not "
+        "installed here, so this file could not be inspected at all.",
+    "GGUF header unreadable": "This file claims to be a GGUF but its header cannot be parsed — it is "
+        "corrupt, truncated, or not really a GGUF.",
+    "bad magic": "The file's first bytes match no known model format — it is not a GGUF or safetensors "
+        "file, whatever its name says.",
+    "comparing a": "These two fingerprints were made from different formats (for example a GGUF against a "
+        "safetensors file). Names and precision differ between formats, so the differences listed below are "
+        "expected and the verdict is not meaningful.",
 }
 
 SEV_COLOR = {"CRIT": "#c0392b", "WARN": "#d68910", "INFO": "#5d6d7e", "OK": "#1e8449"}
@@ -65,7 +118,7 @@ SEV_LABEL = {"CRIT": "CRITICAL", "WARN": "WARNING", "INFO": "Info", "OK": "OK"}
 
 def plain_for(sev, sec, msg):
     for k, v in PLAIN.items():
-        if msg.startswith(k) or k in msg[:40]:
+        if msg.startswith(k) or k in msg[:40] or k in msg:
             return v
     return ""
 
@@ -111,7 +164,9 @@ def render_file_block(name, items):
     id_rows = []
     for _, sec, m in items:
         if sec == "meta" and ("=" in m and ("architecture=" in m or m.split("=")[0] in
-                ("general.quantized_by", "general.base_model", "general.source.url"))):
+                ("general.quantized_by", "general.base_model", "general.source.url",
+                 "model_type", "torch_dtype", "transformers_version", "base_model",
+                 "quantized_by", "converted_by", "source"))):
             id_rows.append(m)
     arch_line = next((m for m in id_rows if "architecture=" in m), None)
     arch = arch_line.split("architecture=")[1].split()[0] if arch_line else "?"
@@ -121,8 +176,12 @@ def render_file_block(name, items):
     tpl_findings = [(s, m) for s, sec, m in items if sec == "template"]
     tpl_crits = sum(1 for s, _ in tpl_findings if s == "CRIT")
     tpl_warns = sum(1 for s, _ in tpl_findings if s == "WARN")
+    tpl_sources = [m.split("template sidecar: ", 1)[1].split(" (")[0] for s, m in tpl_findings
+                   if s == "INFO" and m.startswith("template sidecar: ")]
     if tpl_crits:
         tpl_verdict, tpl_color = "❌ HOSTILE PATTERNS FOUND", SEV_COLOR["CRIT"]
+    elif any("no chat template sidecar" in m.lower() for s, m in tpl_findings):
+        tpl_verdict, tpl_color = "➖ NO SIDECAR TEMPLATE FOUND", SEV_COLOR["WARN"]
     elif any("no chat template" in m.lower() or "no tokenizer.chat_template" in m for s, m in tpl_findings):
         tpl_verdict, tpl_color = "➖ NONE BAKED INTO FILE", SEV_COLOR["WARN"]
     elif tpl_warns:
@@ -134,6 +193,7 @@ def render_file_block(name, items):
         <tr><td>Model type</td><td>{html.escape(arch)}{(' · quant ' + html.escape(quant)) if quant else ''}</td></tr>
         {''.join(f'<tr><td>{html.escape(m.split("=")[0].replace("general.",""))}</td><td>{html.escape(m.split("=",1)[1])}</td></tr>' for m in prov)}
         <tr><td>Chat template</td><td style="color:{tpl_color};font-weight:600">{tpl_verdict}</td></tr>
+        {f'<tr><td>Template source</td><td class="mono">{html.escape(", ".join(tpl_sources))}</td></tr>' if tpl_sources else ''}
       </table>"""
     return f"""
     <section class="fileblock">
@@ -182,13 +242,13 @@ tr.ok td:first-child { border-left: 4px solid #1e8449; }
 .idcard td { font-size: 0.95em; }
 """
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
-def generate(ggufs, outdir):
+def generate(models, outdir):
     outdir.mkdir(parents=True, exist_ok=True)
     blocks, all_json = [], []
     tally = {"CRIT": 0, "WARN": 0, "OK": 0}
-    for g in ggufs:
+    for g in models:
         rep = Report()
         try:
             _audit(Path(g), rep)
@@ -203,7 +263,7 @@ def generate(ggufs, outdir):
                          "findings": [{"severity": s, "section": sec, "message": m}
                                       for s, sec, m in rep.items]})
     stamp = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M")
-    n = len(ggufs)
+    n = len(models)
     summary = f"""
     <div class="summary">
       <div class="sumitem" style="border-color:{SEV_COLOR['CRIT']}"><span class="sumnum" style="color:{SEV_COLOR['CRIT']}">{tally['CRIT']}</span>do not run</div>
@@ -211,8 +271,8 @@ def generate(ggufs, outdir):
       <div class="sumitem" style="border-color:{SEV_COLOR['OK']}"><span class="sumnum" style="color:{SEV_COLOR['OK']}">{tally['OK']}</span>no red flags</div>
     </div>"""
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>GGUF Audit Report</title><style>{CSS}</style></head><body>
-<h1>🛡️ GGUF Audit Report</h1>
+<title>Model Audit Report</title><style>{CSS}</style></head><body>
+<h1>🛡️ Model Audit Report</h1>
 <p class="foot" style="border:none;margin-top:0">{n} file{'s' if n != 1 else ''} audited · generated {stamp} by model-audit v{VERSION}</p>
 {summary if n > 1 else ''}
 {''.join(blocks)}
@@ -229,7 +289,7 @@ themselves are free of subtle tampering — for that, generate per-tensor finger
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("ggufs", nargs="+")
+    ap.add_argument("models", nargs="+")
     ap.add_argument("-o", "--outdir", type=Path, default=Path(__file__).parent / "reports")
     a = ap.parse_args()
-    print(generate([Path(g) for g in a.ggufs], a.outdir))
+    print(generate([Path(g) for g in a.models], a.outdir))

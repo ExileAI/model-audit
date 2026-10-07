@@ -30,12 +30,26 @@ python3 model_audit.py model.gguf --tensor-hashes
 ```
 
 - The first command proves your copy is what the repo published at that commit.
+  (It works the same for `model.safetensors` — the format is auto-detected.)
 - The second writes `model.gguf.tensorhashes.json` — the per-weight fingerprint.
   **Keep it next to the model, forever.** It is your evidence that the weights you
   run today are the weights you audited today.
 
 Read the report. CRIT findings → do not load the model, full stop. Warnings → read
 each explanation; tool-calling models trip "file I/O"-style patterns legitimately.
+
+### 2b. If the model is safetensors, hash the sidecars too
+
+A safetensors file carries no chat template: the instructions live in sidecars
+(`chat_template.jinja`, `tokenizer_config.json`, `config.json`). Those are swappable
+on their own, so hash them alongside the weights:
+
+```bash
+sha256sum model.safetensors *.jinja tokenizer_config.json config.json > SIDECARS.sha256
+```
+
+The audit already scans every one of those templates for hostile content — but the
+hash is what lets you prove later that the file you read is still the file in place.
 
 ## 3. Whenever you re-download or copy the model
 
@@ -51,6 +65,11 @@ Re-run both commands. The `--tensor-hashes` JSON now pays off:
   GGUF. The weights are the artifact; sidecars are a separate supply chain.
 - Prefer loading the template baked into the GGUF; if your app offers to use an
   external `chat_template.jinja`, audit that file too (it overrides the in-file one).
+  For safetensors there is nothing baked in — the sidecar *is* the template, so audit
+  and hash it.
+- Never enable `trust_remote_code` for a model you have not read. If the audit reports
+  `auto_map` in `config.json` or `tokenizer_config.json`, the repo ships Python that
+  your loader will execute — that is code you are running, not weights you are loading.
 - Re-check the repo occasionally: if the pinned revision's files change upstream,
   your copy is now the only honest one — and the uploader has some explaining to do.
 

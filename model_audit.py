@@ -2,6 +2,10 @@
 """
 model_audit — supply-chain auditor for (abliterated) model artifacts.
 
+Audits GGUF files (metadata, chat template, tensors, sidecars) and safetensors
+files (header layout, tensor sizes, index consistency, and every template
+sidecar in the directory).
+
 What it checks, per the threat model in the verification guide:
   1. File identity: SHA-256, size, GGUF version, alignment quirks.
   2. Metadata: general.* KVs, architecture sanity (name vs tensor shapes),
@@ -17,14 +21,14 @@ What it checks, per the threat model in the verification guide:
 
 Exit codes: 0 = clean, 1 = findings, 2 = hard errors.
 """
-import argparse, hashlib, json, os, re, sys, unicodedata
+import argparse, hashlib, json, os, re, struct, sys, unicodedata
 from pathlib import Path
 
 CHUNK = 1 << 24
 try:
     import gguf
-except ImportError:
-    sys.exit("pip install gguf")
+except ImportError:  # safetensors auditing needs no third-party packages at all
+    gguf = None
 
 # ---------------- findings collector ----------------
 class Report:
@@ -105,7 +109,7 @@ def scan_template(tpl, rep):
     code_only = COMMENT.sub("", tpl)  # comments demoted: pattern hits there are INFO
     for pat, label in DANGEROUS:
         for m in re.finditer(pat, code_only, re.I):
-            ctx = tpl[max(0, m.start()-30):m.end()+30].replace("\n", " ")
+            ctx = code_only[max(0, m.start()-30):m.end()+30].replace("\n", " ")
             sev = "INFO" if label.endswith("wording") and "tool" in code_only[max(0,m.start()-200):m.start()+200].lower() else "WARN"
             rep.add(sev, "template", f"{label}: ...{ctx}...")
     # structural surprise: template doing arithmetic/loops over non-message vars
@@ -153,23 +157,39 @@ def check_meta(md, path, rep):
         rep.add("WARN", "meta", "no tokenizer.ggml.model — tokenizer KVs missing?")
     return arch
 
-def check_tensors(tensors, arch, rep):
+ATTN_TOKENS = {"gguf": ("attn_q", "attn_k", "attn_v"),
+               "hf": ("q_proj", "k_proj", "v_proj", "query", "key", "value")}
+ABLIT_SITES = ("ffn_down", "ffn_out", "attn_o", "down_proj", "o_proj", "out_proj", "output.weight")
+
+def check_tensors(tensors, arch, rep, naming="gguf"):
     names = [t.name for t in tensors]
     n = len(names)
     rep.add("INFO", "tensors", f"{n} tensors total")
+    if naming == "hf":
+        counts, params = {}, 0
+        for t in tensors:
+            counts[t.dtype] = counts.get(t.dtype, 0) + 1
+            numel = 1
+            for d in t.shape:
+                numel *= d
+            params += numel
+        census = ", ".join(f"{d}:{c}" for d, c in sorted(counts.items(), key=lambda x: -x[1]))
+        rep.add("INFO", "tensors", f"dtypes: {census}; {params:,} parameters in this file")
     # classic structure spot-checks
-    has_attn = sum(1 for x in names if "attn_q" in x or "attn_k" in x or "attn_v" in x)
+    has_attn = sum(1 for x in names if any(k in x for k in ATTN_TOKENS.get(naming, ATTN_TOKENS["gguf"])))
     if has_attn and has_attn < 3:
         rep.add("WARN", "tensors", "attention projections partially missing — possible tensor pruning/swap")
-    for t in tensors:
-        shp = list(t.shape)
-        if shp and any(s == 0 for s in shp):
-            rep.add("CRIT", "tensors", f"tensor {t.name} has a zero dimension {t.shape}")
+    if naming == "gguf":  # safetensors empty tensors are already reported by st_tensors
+        for t in tensors:
+            shp = list(t.shape)
+            if shp and any(s == 0 for s in shp):
+                rep.add("CRIT", "tensors", f"tensor {t.name} has a zero dimension {t.shape}")
     # FFN/ATTN norm ratio sanity per layer (abliteration edits ffn_down/out or attn oproj)
-    ffn_down = [t for t in tensors if "ffn_down" in t.name and ".weight" in t.name]
-    if ffn_down:
-        rep.add("INFO", "tensors", f"ffn_down tensors present: {len(ffn_down)} "
-                                   "(abliteration commonly edits ffn_down/ffn_out/attn_o — diff these vs a trusted build)")
+    sites = [t for t in tensors if any(k in t.name for k in ABLIT_SITES)]
+    if sites:
+        rep.add("INFO", "tensors", f"{len(sites)} tensors sit at common abliteration edit sites "
+                                   "(ffn_down/ffn_out/attn_o, or down_proj/o_proj in HF naming) — "
+                                   "diff these against a trusted build")
     return names
 
 # ---------------- sidecars ----------------
@@ -182,6 +202,262 @@ def check_sidecars(path, rep):
             rep.add("WARN", "sidecar", f"executable/script shipped alongside: {sib.name}")
         elif ext in {".json", ".txt", ".md", ".yaml", ".yml"} and "config" in sib.name.lower():
             rep.add("INFO", "sidecar", f"config file present (card-vs-file mismatch possible): {sib.name}")
+
+# ---------------- safetensors ----------------
+# Layout: an 8-byte little-endian header length, that many bytes of JSON
+# ({tensor_name: {dtype, shape, data_offsets}}, plus an optional "__metadata__"
+# object), then the raw tensor bytes. data_offsets are relative to the start of
+# the data section, so per-tensor hashing needs no tensor walk at all.
+#
+# Two things matter for the threat model here. One, everything in the header is
+# attacker-controlled text the uploader wrote — a header agreeing with itself and
+# with the file length is a consistency check, not a safety check. Two, this
+# format does NOT carry the chat template: it lives in a sidecar
+# (chat_template.jinja, or the chat_template key in tokenizer_config.json). That
+# sidecar is the tempting target, because swapping 2 KB next to a 15 GB file that
+# nobody re-hashes is far cheaper than tampering with the weights themselves.
+ST_MAX_HEADER = 256 << 20
+ST_DTYPE_SIZE = {"F64": 8, "I64": 8, "U64": 8, "F32": 4, "I32": 4, "U32": 4,
+                 "F16": 2, "BF16": 2, "I16": 2, "U16": 2, "I8": 1, "U8": 1,
+                 "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1}
+
+class STTensor:
+    """Duck-types the gguf tensor objects the rest of the scanner works with."""
+    __slots__ = ("name", "shape", "dtype", "data_offset", "n_bytes")
+    def __init__(self, name, shape, dtype, data_offset, n_bytes):
+        self.name, self.shape, self.dtype = name, tuple(shape), dtype
+        self.data_offset, self.n_bytes = data_offset, n_bytes
+
+def looks_like_safetensors(path):
+    """Cheap magic sniff: a plausible 8-byte length followed by JSON opening with '{'.
+
+    The length is not bounded here on purpose — an absurd length is exactly what
+    read_st_header should report as a finding, not what should make us call the file
+    unrecognized.
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(8)
+            if len(raw) < 8 or raw[:4] == b"GGUF":
+                return False
+            n = struct.unpack("<Q", raw)[0]
+            if n < 2:
+                return False
+            head = f.read(64).lstrip()
+    except OSError:
+        return False
+    return head[:1] == b"{"
+
+def read_st_header(path, rep):
+    """Parse the safetensors header. Returns (header, data_start, file_size) or None."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        raw = f.read(8)
+        if len(raw) < 8:
+            rep.add("CRIT", "st-header", "header unreadable: file is shorter than the 8-byte header length")
+            return None
+        hlen = struct.unpack("<Q", raw)[0]
+        if hlen > ST_MAX_HEADER:
+            rep.add("CRIT", "st-header", f"header unreadable: declared length {hlen:,} bytes is implausible "
+                                         f"(> 256 MiB) — fabricated or corrupt")
+            return None
+        if hlen >= size - 8:
+            rep.add("CRIT", "st-header", f"header unreadable: declared length {hlen:,} exceeds the file size "
+                                         f"{size:,} — truncated or fabricated file")
+            return None
+        blob = f.read(hlen)
+    try:
+        hdr = json.loads(blob.decode("utf-8"))
+    except Exception as e:
+        rep.add("CRIT", "st-header", f"header invalid: not valid JSON ({e})")
+        return None
+    if not isinstance(hdr, dict):
+        rep.add("CRIT", "st-header", "header invalid: top level is not a JSON object")
+        return None
+    data_start = 8 + hlen
+    rep.add("INFO", "st-header", f"header {hlen:,} bytes, data section starts at {data_start:,}, file {size:,}")
+    if data_start % 8:
+        rep.add("INFO", "st-header", f"data section starts at {data_start} — not 8-byte aligned "
+                                     f"(the reference writers pad the header so it is)")
+    return hdr, data_start, size
+
+def st_tensors(hdr, data_start, size, rep):
+    """Validate every declared tensor and return shims the shared checks can use."""
+    meta = hdr.get("__metadata__")
+    if meta is not None and not isinstance(meta, dict):
+        rep.add("CRIT", "st-header", "__metadata__ present but not a JSON object")
+    elif isinstance(meta, dict):
+        for k, v in sorted(meta.items()):
+            if isinstance(v, str) and len(v) <= 200:
+                rep.add("INFO", "provenance", f"__metadata__[{k}] = {v}")
+            else:
+                rep.add("INFO", "provenance", f"__metadata__[{k}] present (non-string or oversized)")
+    entries = {k: v for k, v in hdr.items() if k != "__metadata__"}
+    if not entries:
+        rep.add("CRIT", "st-header", "no tensors declared in header")
+    tensors, spans = [], []
+    for name, ent in entries.items():
+        if not isinstance(ent, dict) or not {"dtype", "shape", "data_offsets"} <= set(ent):
+            rep.add("CRIT", "st-header", f"tensor entry missing dtype/shape/data_offsets: {name}")
+            continue
+        dtype, shape, off = ent["dtype"], ent["shape"], ent["data_offsets"]
+        if not (isinstance(off, list) and len(off) == 2 and all(isinstance(x, int) for x in off)):
+            rep.add("CRIT", "st-header", f"tensor entry has malformed data_offsets: {name} ({off!r})")
+            continue
+        begin, end = off
+        if begin < 0 or end < begin:
+            rep.add("CRIT", "st-header", f"tensor entry has nonsensical offsets: {name} [{begin}, {end})")
+            continue
+        n_bytes = end - begin
+        if data_start + end > size:
+            rep.add("CRIT", "st-tensors", f"tensor size: {name} declares data ending at "
+                                          f"{data_start + end:,}, past the end of the file ({size:,}) — truncated")
+            continue
+        unit = ST_DTYPE_SIZE.get(dtype)
+        numel = 1
+        for d in shape:
+            numel *= d
+        if unit is None:
+            rep.add("WARN", "st-tensors", f"tensor size: {name} dtype {dtype!r} is not a known type — "
+                                          f"its byte size cannot be verified")
+        elif int(numel * unit) != n_bytes:
+            rep.add("CRIT", "st-tensors", f"tensor size: {name} is {dtype} {list(shape)}, which implies "
+                                          f"{int(numel * unit):,} bytes, but the header declares {n_bytes:,} — "
+                                          f"the header contradicts itself")
+        if n_bytes == 0 or any(d == 0 for d in shape):
+            rep.add("WARN", "st-tensors", f"tensor size: {name} is empty ({dtype} {list(shape)})")
+        tensors.append(STTensor(name, shape, dtype, data_start + begin, n_bytes))
+        spans.append((begin, end, name))
+    spans.sort()
+    prev_end = 0
+    for begin, end, name in spans:
+        if begin < prev_end:
+            rep.add("CRIT", "st-tensors", f"tensor layout: {name} starts inside another tensor's data — "
+                                          f"the declared layout is not valid safetensors")
+        elif begin > prev_end:
+            rep.add("WARN", "st-tensors", f"undeclared gap: {begin - prev_end:,} bytes between tensors before "
+                                          f"{name} that no header entry accounts for")
+        prev_end = max(prev_end, end)
+    if prev_end < size - data_start:
+        rep.add("WARN", "st-tensors", f"trailing data: {size - data_start - prev_end:,} bytes after the last "
+                                      f"declared tensor that the header does not account for")
+    return tensors
+
+def check_st_config(path, rep):
+    """config.json is where a safetensors file's claimed identity and provenance live."""
+    fp = path.parent / "config.json"
+    if not fp.exists():
+        rep.add("INFO", "meta", "no config.json in this directory — architecture and provenance are not "
+                                "pinned by any sidecar here")
+        return
+    try:
+        cfg = json.loads(fp.read_text("utf-8"))
+    except Exception as e:
+        rep.add("WARN", "sidecar", f"config.json present but unreadable: {e}")
+        return
+    archs = cfg.get("architectures") or []
+    name = cfg.get("_name_or_path") or cfg.get("name_or_path") or path.parent.name
+    rep.add("INFO", "meta", f"architecture={archs[0] if archs else cfg.get('model_type', '?')} "
+                            f"name={name!r} file_type={cfg.get('torch_dtype', '?')} (safetensors)")
+    for key in ("model_type", "torch_dtype", "transformers_version", "base_model",
+                "quantized_by", "converted_by", "source"):
+        if cfg.get(key):
+            rep.add("INFO", "meta", f"{key} = {cfg[key]}")
+    if cfg.get("quantization_config"):
+        qc = cfg["quantization_config"]
+        method = qc.get("quant_method", "?") if isinstance(qc, dict) else "?"
+        rep.add("INFO", "provenance", f"config.json carries quantization_config ({method}) — these weights are "
+                                      f"not raw fp/bf16, and their provenance is the uploader's word")
+    for fp2, label in ((fp, "config.json"), (path.parent / "tokenizer_config.json", "tokenizer_config.json")):
+        if not fp2.exists():
+            continue
+        try:
+            other = cfg if fp2 == fp else json.loads(fp2.read_text("utf-8"))
+        except Exception:
+            continue
+        if other.get("auto_map"):
+            rep.add("WARN", "sidecar", f"auto_map declared in {label}: loading this model with "
+                                       f"trust_remote_code runs Python the uploader ships — a separate supply "
+                                       f"chain from the weights, and the usual way a 'model' executes code")
+
+def _scan_template_labeled(text, rep, label):
+    before = len(rep.items)
+    scan_template(text, rep)
+    for i in range(before, len(rep.items)):
+        sev, sec, msg = rep.items[i]
+        rep.items[i] = (sev, sec, f"{label}: {msg}")
+
+def scan_st_templates(path, rep):
+    """The template is not in the artifact — it is a sidecar. Scan every one we find."""
+    d = path.parent
+    jinjas = [p for p in sorted(d.glob("*.jinja")) + sorted(d.glob("*.jinja2")) if p.is_file()]
+    cfg_templates = []
+    for fp in jinjas:
+        rep.add("INFO", "template", f"template sidecar: {fp.name} ({fp.stat().st_size:,} bytes)")
+        try:
+            _scan_template_labeled(fp.read_text("utf-8", errors="replace"), rep, fp.name)
+        except Exception as e:
+            rep.add("WARN", "template", f"template sidecar: {fp.name} unreadable: {e}")
+    tcfg = d / "tokenizer_config.json"
+    if tcfg.exists():
+        try:
+            tcfg_json = json.loads(tcfg.read_text("utf-8"))
+        except Exception as e:
+            tcfg_json = {}
+            rep.add("WARN", "sidecar", f"tokenizer_config.json present but unreadable: {e}")
+        tpl = tcfg_json.get("chat_template")
+        if isinstance(tpl, str):
+            cfg_templates.append(("tokenizer_config.json", tpl))
+        elif isinstance(tpl, list):
+            cfg_templates += [(f"tokenizer_config.json[chat_template[{i}]]", t)
+                              for i, t in enumerate(tpl) if isinstance(t, str)]
+        elif isinstance(tpl, dict):
+            cfg_templates += [(f"tokenizer_config.json[chat_template.{k}]", v)
+                              for k, v in tpl.items() if isinstance(v, str)]
+    for label, text in cfg_templates:
+        rep.add("INFO", "template", f"template sidecar: {label} ({len(text):,} bytes)")
+        _scan_template_labeled(text, rep, label)
+    if jinjas and cfg_templates:
+        jtxt = jinjas[0].read_text("utf-8", errors="replace")
+        if any(text != jtxt for _, text in cfg_templates):
+            rep.add("WARN", "template", "both a chat_template.jinja sidecar and a chat_template in "
+                                        "tokenizer_config.json exist and they differ — which one a loader uses "
+                                        "is runtime-dependent, so the model's behavior is not pinned by either")
+    if not jinjas and not cfg_templates:
+        rep.add("INFO", "template", "no chat template sidecar in this directory (chat_template.jinja or "
+                                    "tokenizer_config.json) — this format never carries the template inside the "
+                                    "file, so whatever loads the model supplies it")
+
+def check_st_index(path, tensors, rep):
+    """Multi-shard models are described by model.safetensors.index.json — check it agrees."""
+    idxs = sorted(path.parent.glob("*.safetensors.index.json"))
+    if not idxs:
+        return
+    fp = idxs[0]
+    try:
+        idx = json.loads(fp.read_text("utf-8"))
+    except Exception as e:
+        rep.add("WARN", "sidecar", f"index mismatch: {fp.name} unreadable ({e})")
+        return
+    wmap = idx.get("weight_map") or {}
+    shards = sorted(set(wmap.values()))
+    rep.add("INFO", "index", f"{fp.name}: {len(wmap)} tensors across {len(shards)} shard(s)")
+    mine = {t.name for t in tensors}
+    listed_here = {k for k, v in wmap.items() if Path(v).name == path.name}
+    missing = sorted(listed_here - mine)
+    unlisted = sorted(mine - listed_here)
+    if missing:
+        rep.add("CRIT", "index", f"index mismatch: {len(missing)} tensor(s) the index routes to this shard are "
+                                 f"absent from it (e.g. {', '.join(missing[:3])})")
+    if unlisted:
+        rep.add("WARN", "index", f"index mismatch: {len(unlisted)} tensor(s) present here are not listed in "
+                                 f"{fp.name} (e.g. {', '.join(unlisted[:3])}) — added or renamed after indexing")
+    total = (idx.get("metadata") or {}).get("total_size")
+    if len(shards) == 1 and isinstance(total, int):
+        declared = sum(t.n_bytes for t in tensors)
+        if total != declared:
+            rep.add("CRIT", "index", f"index mismatch: metadata.total_size is {total:,} bytes but this file "
+                                     f"declares {declared:,} — the index describes a different file")
 
 # ---------------- HF remote check ----------------
 def hf_check(repo, local_sha, path, rep, revision=None):
@@ -197,14 +473,14 @@ def hf_check(repo, local_sha, path, rep, revision=None):
         info = api.model_info(repo, files_metadata=True, revision=revision)
         match = None
         for s in info.siblings:
-            if s.rfilename.endswith(".gguf") and s.lfs and s.lfs.sha256 == local_sha:
+            # any LFS-tracked file, not just .gguf: the artifact's identity is its hash
+            if s.lfs and s.lfs.sha256 == local_sha:
                 match = s
                 break
         if match is None:
             # try exact filename match for a clearer diagnostic
             byname = [s for s in info.siblings
-                      if s.rfilename.endswith(".gguf") and s.lfs
-                      and Path(s.rfilename).name == path.name]
+                      if s.lfs and Path(s.rfilename).name == path.name]
             if byname:
                 s = byname[0]
                 rep.add("CRIT", "remote",
@@ -219,8 +495,8 @@ def hf_check(repo, local_sha, path, rep, revision=None):
         # warn if the repo ships its own chat template sidecar
         names = {s.rfilename for s in info.siblings}
         if "chat_template.jinja" in names:
-            rep.add("INFO", "remote", f"{repo} ships chat_template.jinja alongside the GGUF — "
-                                      f"loaders may prefer it over the in-file template")
+            rep.add("INFO", "remote", f"{repo} ships chat_template.jinja alongside the weights — "
+                                              f"loaders may prefer it over any template inside the artifact")
     except Exception as e:
         rep.add("WARN", "remote", f"HF fetch failed: {e}")
 
@@ -231,18 +507,24 @@ def dump_tensor_hashes(tensors, path):
         out[t.name] = sha256_at(path, t.data_offset, t.n_bytes)
     return out
 
+def write_baseline(tensors, path, sha, fmt, rep):
+    hashes = dump_tensor_hashes(tensors, path)
+    outp = path.with_suffix(path.suffix + ".tensorhashes.json")
+    outp.write_text(json.dumps({"file_sha256": sha, "format": fmt, "tensors": hashes}, indent=1))
+    rep.add("OK", "baseline", f"per-tensor SHA-256 written to {outp}")
+
 # ---------------- main ----------------
-def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None):
-    rep.add("INFO", "file", f"{path}")
-    sha, size = file_hashes(path)
-    rep.add("INFO", "file", f"sha256={sha}")
-    rep.add("INFO", "file", f"size={size:,}")
-    with open(path, "rb") as f:
-        magic = f.read(4)
-    if magic != b"GGUF":
-        rep.add("CRIT", "file", f"bad magic {magic!r} — not a GGUF")
+def _audit_gguf(path, rep, sha, size, do_hashes, hf_repo, hf_revision):
+    rep.add("INFO", "file", "format=gguf")
+    if gguf is None:
+        rep.add("CRIT", "file", "the gguf python package is not installed (pip install gguf) — "
+                                "GGUF files cannot be parsed without it")
         return
-    rdr = gguf.GGUFReader(str(path))
+    try:
+        rdr = gguf.GGUFReader(str(path))
+    except Exception as e:
+        rep.add("CRIT", "file", f"GGUF header unreadable: {e}")
+        return
     md = {}
     for k in rdr.fields:
         field = rdr.fields[k]
@@ -270,12 +552,39 @@ def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None):
     check_tensors(tensors, arch, rep)
     check_sidecars(path, rep)
     if do_hashes:
-        hashes = dump_tensor_hashes(tensors, path)
-        outp = path.with_suffix(path.suffix + ".tensorhashes.json")
-        outp.write_text(json.dumps({"file_sha256": sha, "tensors": hashes}, indent=1))
-        rep.add("OK", "baseline", f"per-tensor SHA-256 written to {outp}")
+        write_baseline(tensors, path, sha, "gguf", rep)
     if hf_repo:
         hf_check(hf_repo, sha, path, rep, revision=hf_revision)
+
+def _audit_st(path, rep, sha, size, do_hashes, hf_repo, hf_revision):
+    rep.add("INFO", "file", "format=safetensors")
+    parsed = read_st_header(path, rep)
+    if parsed is None:
+        return
+    hdr, data_start, fsize = parsed
+    tensors = st_tensors(hdr, data_start, fsize, rep)
+    check_tensors(tensors, "?", rep, naming="hf")
+    check_st_config(path, rep)
+    scan_st_templates(path, rep)
+    check_st_index(path, tensors, rep)
+    check_sidecars(path, rep)
+    if do_hashes:
+        write_baseline(tensors, path, sha, "safetensors", rep)
+    if hf_repo:
+        hf_check(hf_repo, sha, path, rep, revision=hf_revision)
+
+def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None):
+    rep.add("INFO", "file", f"{path}")
+    sha, size = file_hashes(path)
+    rep.add("INFO", "file", f"sha256={sha}")
+    rep.add("INFO", "file", f"size={size:,}")
+    with open(path, "rb") as f:
+        magic = f.read(4)
+    if magic == b"GGUF":
+        return _audit_gguf(path, rep, sha, size, do_hashes, hf_repo, hf_revision)
+    if looks_like_safetensors(path):
+        return _audit_st(path, rep, sha, size, do_hashes, hf_repo, hf_revision)
+    rep.add("CRIT", "file", f"bad magic {magic!r} — not a GGUF or safetensors file")
 
 def diff_baselines(file_a, file_b, rep):
     """Compare two .tensorhashes.json baselines of the same base model."""
@@ -284,6 +593,12 @@ def diff_baselines(file_a, file_b, rep):
     ta, tb = A["tensors"], B["tensors"]
     rep.add("INFO", "diff", f"A: {file_a} (file sha {A.get('file_sha256','?')[:16]}…)")
     rep.add("INFO", "diff", f"B: {file_b} (file sha {B.get('file_sha256','?')[:16]}…)")
+    fa, fb = A.get("format", "?"), B.get("format", "?")
+    if fa != fb:
+        rep.add("WARN", "diff", f"comparing a {fa} baseline with a {fb} one — tensor names and precision "
+                                f"differ between formats, so every difference below is expected and the "
+                                f"classification is not meaningful. Compare like with like, or use this only "
+                                f"to confirm that a conversion preserved individual tensors")
     only_a = sorted(set(ta) - set(tb))
     only_b = sorted(set(tb) - set(ta))
     changed = sorted(k for k in set(ta) & set(tb) if ta[k] != tb[k])
@@ -301,8 +616,7 @@ def diff_baselines(file_a, file_b, rep):
         rep.add("OK", "diff", "baselines are byte-identical tensor-wise")
         return
     # classify: abliteration-style (few tensors, at common edit sites) vs broad change
-    edit_sites = sum(1 for k in changed
-                     if "ffn_down" in k or "ffn_out" in k or "attn_o" in k or "output.weight" in k)
+    edit_sites = sum(1 for k in changed if any(s in k for s in ABLIT_SITES))
     if 0 < len(changed) <= 8 and not only_a and not only_b and edit_sites >= max(1, len(changed) // 2):
         rep.add("INFO", "diff", f"pattern matches targeted weight edits (abliteration-class: "
                                 f"{edit_sites}/{len(changed)} at ffn_down/ffn_out/attn_o sites)")
@@ -325,8 +639,8 @@ def cmd_diff(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="audit a GGUF for supply-chain tampering")
-    ap.add_argument("gguf", type=Path, nargs="?", help="GGUF file to audit")
+    ap = argparse.ArgumentParser(description="audit a GGUF or safetensors file for supply-chain tampering")
+    ap.add_argument("model", type=Path, nargs="?", help="model file to audit (GGUF or safetensors; format auto-detected)")
     ap.add_argument("--tensor-hashes", action="store_true", help="emit per-tensor SHA-256 baseline JSON")
     ap.add_argument("--hf", metavar="USER/REPO", help="cross-check local sha256 against HF LFS hash")
     ap.add_argument("--revision", metavar="COMMIT_SHA", default=None,
@@ -344,17 +658,17 @@ def main():
         warns = sum(1 for s, *_ in rep.items if s == "WARN")
         print(f"\n== diff: {crits} critical, {warns} warnings ==")
         sys.exit(2 if crits else (1 if warns else 0))
-    if not a.gguf:
+    if not a.model:
         ap.print_help()
         sys.exit(0)
-    if not a.gguf.exists():
-        sys.exit(f"not found: {a.gguf}")
+    if not a.model.exists():
+        sys.exit(f"not found: {a.model}")
     rep = Report()
-    audit(a.gguf, rep, do_hashes=a.tensor_hashes, hf_repo=a.hf, hf_revision=a.revision)
+    audit(a.model, rep, do_hashes=a.tensor_hashes, hf_repo=a.hf, hf_revision=a.revision)
     rep.print(as_json=a.json)
     crits = sum(1 for s, *_ in rep.items if s == "CRIT")
     warns = sum(1 for s, *_ in rep.items if s == "WARN")
-    print(f"\n== {a.gguf.name}: {crits} critical, {warns} warnings ==")
+    print(f"\n== {a.model.name}: {crits} critical, {warns} warnings ==")
     sys.exit(2 if crits else (1 if warns else 0))
 
 if __name__ == "__main__":

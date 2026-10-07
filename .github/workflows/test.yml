@@ -17,6 +17,8 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run scanner self-tests
         run: python3 tests/test_scanner.py
+      - name: Run safetensors self-tests
+        run: python3 tests/test_safetensors.py
       - name: Smoke-test CLI help
         run: |
           python3 model_audit.py --help > /dev/null
