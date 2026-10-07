@@ -1,5 +1,5 @@
 """
-report.py — human-friendly HTML report generator for gguf_audit results.
+report.py — human-friendly HTML report generator for model_audit results.
 
 Point it at one or more GGUF files; it runs the full audit and writes a
 plain-language HTML report (plus machine-readable JSON) to reports/.
@@ -11,7 +11,7 @@ import argparse, json, sys, html
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from gguf_audit import Report, audit as _audit
+from model_audit import Report, audit as _audit
 
 # plain-language translations for every finding we emit
 PLAIN = {
@@ -79,14 +79,14 @@ def verdict(crits, warns):
         return ("USE WITH AWARENESS", SEV_COLOR["WARN"],
                 "Warnings mean something needs your attention, but the file isn't clearly hostile. Read the details below.",
                 "What to do: read each warning's explanation below — some are false positives from "
-                "tool-calling models. If the model matters to you, run <code>python3 gguf_audit.py "
+                "tool-calling models. If the model matters to you, run <code>python3 model_audit.py "
                 "&lt;file&gt; --tensor-hashes</code> to save a per-weight fingerprint baseline.")
     return ("NO RED FLAGS FOUND", SEV_COLOR["OK"],
             "Nothing hostile was detected. Note: this audit can't prove weights are 'good' — "
             "only that nothing obviously bad was found in metadata and the chat template. "
             "Per-weight fingerprints (tensor hashes) are needed to compare against a trusted build.",
             "What to do: if this model matters to you, save a fingerprint baseline now: "
-            "<code>python3 gguf_audit.py &lt;file&gt; --tensor-hashes</code>. Keep the JSON next "
+            "<code>python3 model_audit.py &lt;file&gt; --tensor-hashes</code>. Keep the JSON next "
             "to the model — it lets you prove later that the weights haven't changed.")
 
 def render_file_block(name, items):
@@ -213,7 +213,7 @@ def generate(ggufs, outdir):
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>GGUF Audit Report</title><style>{CSS}</style></head><body>
 <h1>🛡️ GGUF Audit Report</h1>
-<p class="foot" style="border:none;margin-top:0">{n} file{'s' if n != 1 else ''} audited · generated {stamp} by gguf-audit v{VERSION}</p>
+<p class="foot" style="border:none;margin-top:0">{n} file{'s' if n != 1 else ''} audited · generated {stamp} by model-audit v{VERSION}</p>
 {summary if n > 1 else ''}
 {''.join(blocks)}
 <p class="foot"><b>What this report can and cannot tell you:</b> these checks read the file's

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gguf_audit — supply-chain auditor for (abliterated) GGUF models.
+model_audit — supply-chain auditor for (abliterated) model artifacts.
 
 What it checks, per the threat model in the verification guide:
   1. File identity: SHA-256, size, GGUF version, alignment quirks.

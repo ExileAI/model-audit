@@ -25,8 +25,8 @@ date:     <today>
 ## 2. Immediately after download: audit and baseline
 
 ```bash
-python3 gguf_audit.py model.gguf --hf <uploader>/<repo> --revision <commit_sha>
-python3 gguf_audit.py model.gguf --tensor-hashes
+python3 model_audit.py model.gguf --hf <uploader>/<repo> --revision <commit_sha>
+python3 model_audit.py model.gguf --tensor-hashes
 ```
 
 - The first command proves your copy is what the repo published at that commit.

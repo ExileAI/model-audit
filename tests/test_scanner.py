@@ -1,5 +1,5 @@
 """
-test_scanner.py — self-test for the gguf-audit chat-template scanner.
+test_scanner.py — self-test for the model-audit chat-template scanner.
 
 Feeds every template in templates/tampered/ through the scanner and asserts it
 fires; feeds every template in templates/benign/ and asserts it stays clean.
@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-from gguf_audit import Report, scan_template
+from model_audit import Report, scan_template
 
 # minimum findings a specimen must produce to prove detection
 EXPECTED = {

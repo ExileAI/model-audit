@@ -1,4 +1,4 @@
-# AGENTS.md — gguf-audit
+# AGENTS.md — model-audit
 
 Guidance for AI coding agents working in this repository.
 
@@ -16,7 +16,7 @@ are benign.
 ## Layout
 
 ```
-gguf_audit.py        core scanner CLI (exit codes: 0 clean, 1 warnings, 2 critical)
+model_audit.py       core scanner CLI (exit codes: 0 clean, 1 warnings, 2 critical)
 report.py            HTML report generator (plain language, for non-technical users)
 tests/test_scanner.py  self-test; tampered specimens must be caught, benign must pass
 templates/tampered/  attack specimens — documentation only, never install

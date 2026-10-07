@@ -1,4 +1,4 @@
-# What gguf-audit can and cannot tell you
+# What model-audit can and cannot tell you
 
 Read this before trusting any audit verdict. This tool narrows uncertainty; it cannot
 eliminate it.
