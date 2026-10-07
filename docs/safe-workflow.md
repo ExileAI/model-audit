@@ -1,0 +1,64 @@
+# Safe workflow: from download to (justified) trust
+
+This is the recipe `docs/limitations.md` implies. Follow it in order.
+
+## 0. Before you download anything
+
+Ask three questions about the uploader:
+1. Do they document their method (abliteration layers, base model, quantization recipe)?
+2. Do they publish in **safetensors** with a README explaining what they changed?
+3. Do they have history, or is this a fresh account whose only uploads are GGUFs?
+
+Two or three "no" answers → treat the file as untrusted no matter what any audit says.
+
+## 1. At download: pin and record
+
+Record three things in a note next to the model — the moment you download is the only
+time you can pin history:
+
+```
+repo:     <uploader>/<model-name>
+revision: <commit SHA from the HF page, "Files and versions" → click the commit>
+date:     <today>
+```
+
+## 2. Immediately after download: audit and baseline
+
+```bash
+python3 gguf_audit.py model.gguf --hf <uploader>/<repo> --revision <commit_sha>
+python3 gguf_audit.py model.gguf --tensor-hashes
+```
+
+- The first command proves your copy is what the repo published at that commit.
+- The second writes `model.gguf.tensorhashes.json` — the per-weight fingerprint.
+  **Keep it next to the model, forever.** It is your evidence that the weights you
+  run today are the weights you audited today.
+
+Read the report. CRIT findings → do not load the model, full stop. Warnings → read
+each explanation; tool-calling models trip "file I/O"-style patterns legitimately.
+
+## 3. Whenever you re-download or copy the model
+
+Re-run both commands. The `--tensor-hashes` JSON now pays off:
+
+- Same file SHA-256 → identical copy.
+- Different SHA-256 but you need to know *what* changed → compare tensor baselines
+  (see `diff` in the README): metadata-only change vs. swapped weight blocks.
+
+## 4. Ongoing hygiene
+
+- Never run scripts, converters, or "helpers" shipped in the same repo/folder as a
+  GGUF. The weights are the artifact; sidecars are a separate supply chain.
+- Prefer loading the template baked into the GGUF; if your app offers to use an
+  external `chat_template.jinja`, audit that file too (it overrides the in-file one).
+- Re-check the repo occasionally: if the pinned revision's files change upstream,
+  your copy is now the only honest one — and the uploader has some explaining to do.
+
+## What this workflow still cannot do
+
+- Prove weights are benign in isolation (see `docs/limitations.md`).
+- Detect post-quantization training without a trusted baseline of the same base.
+- Vouch for an uploader whose files hash perfectly.
+
+The gold standard remains: documented safetensors source → you quantize yourself →
+you own the hashes from birth.

@@ -1,0 +1,12 @@
+{#- SPECIMEN 03 — ZERO-WIDTH HIDDEN INSTRUCTIONS -#
+ # The visible template looks perfectly normal. Between 'user:' and the
+ # content there is a run of zero-width characters (U+200B U+200C U+200D
+ # U+2060). Depending on the tokenizer these either tokenize as garbage
+ # markers that shift model behavior, or get stripped inconsistently
+ # between train/inference, opening an injection seam. Invisible in every
+ # editor and in every 'just print the template' review.
+ #}
+{%- for m in messages -%}
+{{ m['role'] }}:​​‌‍⁠{{ m['content'] }}
+{%- endfor -%}
+{%- if add_generation_prompt -%}<|assistant|>{%- endif -%}

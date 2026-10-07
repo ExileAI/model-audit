@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+reports/
+baselines/
+*.tensorhashes.json
+*.gguf

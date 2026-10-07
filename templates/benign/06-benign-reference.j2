@@ -1,0 +1,20 @@
+{#- REFERENCE — BENIGN TEMPLATE (Qwen-style shape) -#
+ # What honest looks like: touches only messages, roles, content,
+ # special tokens, and the generation-prompt flag. No imports, no
+ # dunders, no attr traversal, no invisible characters, all-ASCII.
+ #}
+{%- for m in messages -%}
+{%- if m['role'] == 'system' -%}
+<|im_start|>system
+{{ m['content'] }}<|im_end|>
+{%- elif m['role'] == 'user' -%}
+<|im_start|>user
+{{ m['content'] }}<|im_end|>
+{%- elif m['role'] == 'assistant' -%}
+<|im_start|>assistant
+{{ m['content'] }}<|im_end|>
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+<|im_start|>assistant
+{%- endif -%}

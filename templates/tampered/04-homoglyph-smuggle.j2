@@ -1,0 +1,11 @@
+{#- SPECIMEN 04 — HOMOGLYPH SMUGGLE -#
+ # Role keywords are spelled with Cyrillic/Greek look-alikes. A human
+ # reviewer (and naive keyword filters) sees normal 'user'/'assistant'.
+ # The actual bytes differ, so any downstream exact-match check on roles
+ # fails silently — letting crafted messages pass as non-roles, or
+ # breaking safety filters that rely on parsing the rendered text.
+ #}
+{%- for m in mеssages -%}
+{{ 'usеr' if m['role'] == 'usеr' else 'аssistant' }}: {{ m['content'] }}
+{%- endfor -%}
+{#- note: 'е' above is U+0435 CYRILLIC SMALL LETTER IE, 'а' is U+0430 -#}

