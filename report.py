@@ -126,6 +126,15 @@ PLAIN = {
 SEV_COLOR = {"CRIT": "#c0392b", "WARN": "#d68910", "INFO": "#5d6d7e", "OK": "#1e8449"}
 SEV_LABEL = {"CRIT": "CRITICAL", "WARN": "WARNING", "INFO": "Info", "OK": "OK"}
 
+# raw section keys are internal; this report is read by non-technical people
+SECTION_LABELS = {
+    "file": "File", "meta": "Metadata", "template": "Chat template", "tensors": "Weights",
+    "st-header": "File header", "st-tensors": "Weight structure", "index": "Shard index",
+    "manifest": "Uploader checksum", "sidecar": "Sidecar files", "provenance": "Provenance",
+    "remote": "Remote check", "baseline": "Fingerprint baseline", "diff": "Comparison",
+    "audit": "Audit",
+}
+
 def plain_for(sev, sec, msg):
     for k, v in PLAIN.items():
         if msg.startswith(k) or k in msg[:40] or k in msg:
@@ -165,7 +174,7 @@ def render_file_block(name, items):
         rows.append(f"""
         <tr class="{sev.lower()}">
           <td><span class="badge" style="background:{SEV_COLOR[sev]}">{SEV_LABEL[sev]}</span></td>
-          <td><span class="sec">{html.escape(sec)}</span>
+          <td><span class="sec">{html.escape(SECTION_LABELS.get(sec, sec))}</span>
               <div class="msg">{html.escape(msg)}</div>{explanation}</td>
         </tr>""")
     meta = {m.split("=",1)[0]: m.split("=",1)[1] for _, sec, m in items
@@ -173,7 +182,7 @@ def render_file_block(name, items):
     # model identity card: pull the meta KVs users can read at a glance
     id_rows = []
     for _, sec, m in items:
-        if sec == "meta" and ("=" in m and ("architecture=" in m or m.split("=")[0] in
+        if sec == "meta" and ("=" in m and ("architecture=" in m or m.split("=")[0].strip() in
                 ("general.quantized_by", "general.base_model", "general.source.url",
                  "model_type", "torch_dtype", "transformers_version", "base_model",
                  "quantized_by", "converted_by", "source"))):
@@ -182,6 +191,8 @@ def render_file_block(name, items):
     arch = arch_line.split("architecture=")[1].split()[0] if arch_line else "?"
     quant = next((m.split("=",1)[1] for s, sec, m in items
                   if sec == "meta" and m.startswith("quant=")), "")
+    fmt = next((m.split("=", 1)[1] for s, sec, m in items
+                if sec == "file" and m.startswith("format=")), "")
     prov = [m for m in id_rows if "architecture=" not in m]
     tpl_findings = [(s, m) for s, sec, m in items if sec == "template"]
     tpl_crits = sum(1 for s, _ in tpl_findings if s == "CRIT")
@@ -200,8 +211,9 @@ def render_file_block(name, items):
         tpl_verdict, tpl_color = "✅ CLEAN", SEV_COLOR["OK"]
     idcard = f"""
       <table class="meta idcard">
+        {f'<tr><td>Format</td><td>{html.escape(fmt)}</td></tr>' if fmt else ''}
         <tr><td>Model type</td><td>{html.escape(arch)}{(' · quant ' + html.escape(quant)) if quant else ''}</td></tr>
-        {''.join(f'<tr><td>{html.escape(m.split("=")[0].replace("general.",""))}</td><td>{html.escape(m.split("=",1)[1])}</td></tr>' for m in prov)}
+        {''.join(f'<tr><td>{html.escape(m.split("=")[0].strip().replace("general.",""))}</td><td>{html.escape(m.split("=",1)[1].strip())}</td></tr>' for m in prov)}
         <tr><td>Chat template</td><td style="color:{tpl_color};font-weight:600">{tpl_verdict}</td></tr>
         {f'<tr><td>Template source</td><td class="mono">{html.escape(", ".join(tpl_sources))}</td></tr>' if tpl_sources else ''}
       </table>"""

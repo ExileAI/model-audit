@@ -15,6 +15,7 @@ first bytes; no flag, no library needed for safetensors (stdlib only). (Renamed 
 - `templates/tampered/` — attack specimens (documentation only — never install)
 - `tests/test_scanner.py` — chat-template scanner specimens
 - `tests/test_safetensors.py` — structural specimens, synthesized byte by byte
+- `tests/test_report.py` — report rendering: no dropped findings, no internal jargon
 - `docs/limitations.md` — what the audit can and cannot prove (read before changing claims)
 - `docs/safe-workflow.md` — the download → pin → audit → baseline recipe
 - `reports/` — generated audit reports (HTML + JSON); gitignored, never commit

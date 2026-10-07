@@ -20,6 +20,7 @@ model_audit.py       core scanner CLI (exit codes: 0 clean, 1 warnings, 2 critic
 report.py            HTML report generator (plain language, for non-technical users)
 tests/test_scanner.py      self-test; tampered specimens must be caught, benign must pass
 tests/test_safetensors.py  self-test; synthesized safetensors specimens, one broken invariant each
+tests/test_report.py       self-test; report rendering — no dropped findings, no internal jargon
 templates/tampered/  attack specimens — documentation only, never install
 templates/benign/    honest reference templates
 docs/limitations.md  what the audit can and cannot prove (read before changing claims)
@@ -87,12 +88,19 @@ reports/             generated output; gitignored, never commit
   parameters, macro names, loop targets, `{% set %}` names). A real 362-line tool-calling
   template otherwise produces nothing but that noise, and INFO noise is how users learn
   to ignore a scanner. Undefined variables must still be reported.
+- The report is read by non-technical people: never render a raw section key (map them
+  through `SECTION_LABELS`), always state the audited **format** in the identity card, and
+  keep identity lines (sha256/size/format) out of the findings table. Findings whose message
+  shape does not match a filter key vanish silently — `tests/test_report.py` exists to catch
+  exactly that (the identity card's provenance rows were dead for both formats because the
+  filter compared `"base_model"` against `"base_model "`).
 
 ## Testing
 
 ```bash
 python3 tests/test_scanner.py        # GGUF chat-template scanner specimens
 python3 tests/test_safetensors.py    # safetensors structural specimens
+python3 tests/test_report.py         # report rendering: dropped findings, leaked jargon
 python3 model_audit.py --help && python3 report.py --help
 ```
 

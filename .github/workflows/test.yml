@@ -19,6 +19,8 @@ jobs:
         run: python3 tests/test_scanner.py
       - name: Run safetensors self-tests
         run: python3 tests/test_safetensors.py
+      - name: Run report rendering self-tests
+        run: python3 tests/test_report.py
       - name: Smoke-test CLI help
         run: |
           python3 model_audit.py --help > /dev/null
