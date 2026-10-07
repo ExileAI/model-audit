@@ -50,6 +50,7 @@ python3 report.py <file1> <file2>
 | Code execution path | — | `auto_map` in config/tokenizer_config, shipped scripts |
 | Per-tensor hashes | `--tensor-hashes` | `--tensor-hashes` (cheaper — offsets come from the header) |
 | Remote check | `--hf`, by LFS SHA-256 first | same, any LFS-tracked file |
+| Uploader checksums | a shipped `MANIFEST.txt`/`SHA256SUMS`/`*.sha256` next to the file: does it still agree with this file, or has the file been renamed under it | nothing about safety — it is the uploader's own claim. Agreement is internal consistency; disagreement is the drift a swap leaves behind |
 
 ## Threat model & limits
 - Metadata/template/structure checks catch: hostile chat templates, hidden instructions,

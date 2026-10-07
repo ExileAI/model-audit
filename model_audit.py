@@ -477,6 +477,52 @@ def check_st_index(path, tensors, rep):
             rep.add("CRIT", "index", f"index mismatch: metadata.total_size is {total:,} bytes but this file "
                                      f"declares {declared:,} — the index describes a different file")
 
+# ---------------- uploader-supplied checksums ----------------
+MANIFEST_NAMES = ("MANIFEST.txt", "MANIFEST", "SHA256SUMS", "SHA256SUMS.txt",
+                  "checksums.txt", "checksums.sha256")
+
+def check_manifest(path, sha, rep):
+    """Some repos ship their own hashes. Verifying against them is a consistency check.
+
+    The manifest is the uploader's own claim, so agreeing with it proves nothing about
+    safety. But disagreeing with it — or having been renamed under it — is exactly the
+    drift a swap or a re-upload leaves behind, and a repo that publishes hashes is
+    inviting you to check.
+    """
+    fp = next((path.parent / n for n in MANIFEST_NAMES if (path.parent / n).is_file()), None)
+    if fp is None:
+        fp = next((p for p in sorted(path.parent.glob("*.sha256")) + sorted(path.parent.glob("*checksum*"))
+                   if p.is_file()), None)
+    if fp is None:
+        return
+    entries = {}
+    for line in fp.read_text("utf-8", errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        a, b = parts[0], parts[-1].lstrip("*")
+        if re.fullmatch(r"[0-9a-fA-F]{64}", a):
+            entries[b] = a.lower()
+        elif re.fullmatch(r"[0-9a-fA-F]{64}", b):
+            entries[a] = b.lower()
+    if not entries:
+        rep.add("INFO", "manifest", f"{fp.name} present but no readable SHA-256 lines")
+        return
+    if path.name in entries:
+        if entries[path.name] == sha:
+            rep.add("OK", "manifest", f"SHA-256 matches the uploader's own entry for {path.name} in {fp.name}")
+        else:
+            rep.add("CRIT", "manifest", f"MANIFEST MISMATCH: this file is {sha[:16]}… but {fp.name} lists "
+                                        f"{entries[path.name][:16]}… for {path.name} — the file differs from "
+                                        f"what the uploader published hashes for")
+        return
+    for name, h in entries.items():
+        if h == sha:
+            rep.add("INFO", "manifest", f"renamed since the manifest was written: this file's SHA-256 appears "
+                                        f"in {fp.name} as {name} — content unchanged, name is not")
+            return
+    rep.add("INFO", "manifest", f"{fp.name} present ({len(entries)} entries) but this file is not listed in it")
+
 # ---------------- HF remote check ----------------
 def hf_check(repo, local_sha, path, rep, revision=None):
     try:
@@ -572,6 +618,7 @@ def _audit_gguf(path, rep, sha, size, do_hashes, hf_repo, hf_revision):
     tensors = list(rdr.tensors)
     check_tensors(tensors, arch, rep)
     check_sidecars(path, rep)
+    check_manifest(path, sha, rep)
     if do_hashes:
         write_baseline(tensors, path, sha, "gguf", rep)
     if hf_repo:
@@ -589,6 +636,7 @@ def _audit_st(path, rep, sha, size, do_hashes, hf_repo, hf_revision):
     scan_st_templates(path, rep)
     check_st_index(path, tensors, rep)
     check_sidecars(path, rep)
+    check_manifest(path, sha, rep)
     if do_hashes:
         write_baseline(tensors, path, sha, "safetensors", rep)
     if hf_repo:

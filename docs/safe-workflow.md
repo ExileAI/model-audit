@@ -31,6 +31,9 @@ python3 model_audit.py model.gguf --tensor-hashes
 
 - The first command proves your copy is what the repo published at that commit.
   (It works the same for `model.safetensors` — the format is auto-detected.)
+- If the repo ships its own hash list (`MANIFEST.txt`, `SHA256SUMS`, `*.sha256`), the
+  audit checks your file against it and tells you if the file was renamed after hashing.
+  A mismatch under the file's own name is a red flag.
 - The second writes `model.gguf.tensorhashes.json` — the per-weight fingerprint.
   **Keep it next to the model, forever.** It is your evidence that the weights you
   run today are the weights you audited today.

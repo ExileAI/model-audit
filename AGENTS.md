@@ -64,6 +64,19 @@ reports/             generated output; gitignored, never commit
 - Format dispatch is by magic bytes (`GGUF`, else 8-byte length + `{` JSON), never by
   filename extension. An absurd header length must stay a *finding*, not a reason to
   call the file unrecognized.
+- Cross-format `--diff` must compare by **content** (`shape` + SHA-256, matched as a
+  multiset), never by tensor name: GGUF and safetensors name the same weights
+  differently (`blk.0.attn_q` vs `model.layers.0.self_attn.q_proj`), so a per-name
+  comparison flags an honest conversion as a different model. A low content-match count
+  is reported as "not comparable this way", not as tampering.
+- An uploader-shipped checksum file (`MANIFEST.txt`, `SHA256SUMS`, `*.sha256`) is worth
+  verifying in both directions: match under the file's own name is OK; a mismatch is
+  CRIT; the hash matching under a *different* name is the rename-without-change case and
+  is INFO — that is how a rename is proven not to have altered the weights.
+- A "non-standard variable" INFO must skip names the template binds itself (macro
+  parameters, macro names, loop targets, `{% set %}` names). A real 362-line tool-calling
+  template otherwise produces nothing but that noise, and INFO noise is how users learn
+  to ignore a scanner. Undefined variables must still be reported.
 
 ## Testing
 

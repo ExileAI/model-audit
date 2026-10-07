@@ -339,5 +339,69 @@ class TestCrossFormatDiff(unittest.TestCase):
                         "same-format content change must stay critical")
 
 
+class TestUploaderManifest(unittest.TestCase):
+    """A repo's own checksum list is a consistency check, not a safety claim: agreeing
+    with it proves nothing, disagreeing with it is exactly the drift a swap leaves."""
+
+    H = "a" * 64
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="model-audit-man-")
+        self.dir = Path(self.tmp.name)
+        self.file = self.dir / "model.gguf"
+        self.file.write_bytes(b"weights")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def manifest(self, text, name="MANIFEST.txt"):
+        (self.dir / name).write_text(text)
+
+    def check(self, sha):
+        from model_audit import check_manifest
+        rep = Report()
+        check_manifest(self.file, sha, rep)
+        return rep
+
+    def test_no_manifest_is_silent(self):
+        self.assertEqual(self.check(self.H).items, [], "absent manifest must add no findings")
+
+    def test_matching_entry_is_ok(self):
+        self.manifest(f"{self.H}  model.gguf\n")
+        rep = self.check(self.H)
+        self.assertTrue(any(m.startswith("SHA-256 matches the uploader's own entry") for m in msgs(rep, "OK")))
+        self.assertEqual(msgs(rep, "CRIT"), [])
+
+    def test_mismatch_under_own_name_is_critical(self):
+        self.manifest(f"{'b' * 64}  model.gguf\n")
+        rep = self.check(self.H)
+        self.assertTrue(any(m.startswith("MANIFEST MISMATCH") for m in msgs(rep, "CRIT")),
+                        "a file that disagrees with the uploader's own hash list must be critical")
+
+    def test_renamed_file_is_reported_as_content_unchanged(self):
+        self.manifest(f"{self.H}  Gemma-v2-Q4_K_M.gguf\n")
+        rep = self.check(self.H)
+        self.assertTrue(any("renamed since the manifest was written" in m for m in msgs(rep, "INFO")))
+
+    def test_unlisted_file_is_informational(self):
+        self.manifest(f"{'c' * 64}  other.gguf\n")
+        rep = self.check(self.H)
+        self.assertTrue(any("not listed in it" in m for m in msgs(rep, "INFO")))
+        self.assertEqual([m for m in msgs(rep, "CRIT") + msgs(rep, "WARN")], [])
+
+    def test_sha256sum_style_and_asterisk_markers_parse(self):
+        self.manifest(f"{self.H}  *model.gguf\n")
+        self.assertTrue(any(m.startswith("SHA-256 matches") for m in msgs(self.check(self.H), "OK")))
+
+    def test_end_to_end_through_audit_on_safetensors(self):
+        """The manifest check must fire on the safetensors path too, not just GGUF."""
+        st = self.dir / "model.safetensors"
+        st.write_bytes(build(honest_tensors()))
+        sha = hashlib.sha256(st.read_bytes()).hexdigest()
+        self.manifest(f"{sha}  model.safetensors\n")
+        rep = run(st)
+        self.assertTrue(any(m.startswith("SHA-256 matches the uploader's own entry") for m in msgs(rep, "OK")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

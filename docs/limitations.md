@@ -17,6 +17,7 @@ eliminate it.
 | Template sidecar scan (safetensors) | The templates shipped next to the weights (`chat_template.jinja`, every `chat_template` entry in `tokenizer_config.json`) contain no (detected) hostile code, and two disagreeing sources are flagged | That those are the templates that will actually be used — your app may supply its own — or that the pattern list is complete |
 | `*.index.json` check | The shard description matches the shard it describes (weights present, `total_size` right) | That the other shards in the set, or the tensors' contents, are honest |
 | `auto_map` check | The uploader ships Python that loaders may execute when `trust_remote_code` is on | What that code does. Read it, or leave `trust_remote_code` off — that flag is the actual decision |
+| Uploader checksum file | The hash list the uploader shipped still agrees with the file under its own name | That the weights are good. A hostile uploader publishes a hash list that matches a hostile file, and it will pass — this only catches drift *after* hashing (a swapped or silently edited file) |
 | `--tensor-hashes` | A stable per-block fingerprint for **comparison** | Anything, without a trusted baseline to compare against |
 
 ## The things this tool cannot do (and why)

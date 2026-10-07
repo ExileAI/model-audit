@@ -49,6 +49,16 @@ PLAIN = {
         "weights are safe data — anything executable next to them is a separate supply-chain risk. Don't run it.",
     "SHA-256 MISMATCH": "The file's fingerprint does NOT match what the Hugging Face repo currently publishes — "
         "it was swapped, re-uploaded, or this copy didn't come from the repo.",
+    "MANIFEST MISMATCH": "The uploader published a list of hashes with this model, and this file does not match "
+        "the entry under its own name. Either the file was changed after it was hashed, or it was replaced. "
+        "Treat that file as untrustworthy until the uploader explains it.",
+    "renamed since the manifest was written": "The uploader's own hash list still has this file under its old "
+        "name, and the content matches. That is a rename without a content change — harmless in itself, and it "
+        "shows the hash list is still accurate.",
+    "present but no readable SHA-256 lines": "A checksum file ships with this model but this tool could not "
+        "read any hashes out of it.",
+    "but this file is not listed in it": "A checksum file ships with this model but does not cover this file, "
+        "so it can say nothing about it either way.",
     "local SHA-256 matches HF LFS": "The file's fingerprint matches what Hugging Face publishes right now.",
     "per-tensor SHA-256 written": "A per-weight-block fingerprint baseline was saved for future comparison.",
     "config file present": "A config file sits next to the model; its chat settings could differ from what's "
