@@ -316,6 +316,24 @@ class TestCrossFormatDiff(unittest.TestCase):
                         "a lossless conversion was not recognised as content-identical")
         self.assertEqual(msgs(rep, "CRIT"), [], "legitimate cross-format conversion raised CRIT")
 
+    def test_bf16_to_f32_upcast_matches_by_value(self):
+        """The real case: converter writes norms as F32 whose bits are bf16 << 16."""
+        f32_hash = hashlib.sha256(b"widened-norm").hexdigest()
+        bf16_hash = hashlib.sha256(b"bf16-norm").hexdigest()
+        st = self.baseline("a.json", "safetensors",
+                           {"model.language_model.layers.0.input_layernorm.weight": bf16_hash},
+                           {"model.language_model.layers.0.input_layernorm.weight": [3840]})
+        st_json = json.loads(Path(st).read_text())
+        st_json["values"] = {"model.language_model.layers.0.input_layernorm.weight": f32_hash}
+        Path(st).write_text(json.dumps(st_json))
+        gg = self.baseline("b.json", "gguf", {"blk.0.attn_norm.weight": f32_hash},
+                           {"blk.0.attn_norm.weight": [3840]})
+        rep = self.run_diff(st, gg)
+        self.assertTrue(any(m.startswith("content match: all 1 weight blob") for m in msgs(rep, "OK")),
+                        "an upcast norm was not matched by value")
+        self.assertTrue(any("1 identical after a storage-type change" in m for m in msgs(rep, "OK")))
+        self.assertEqual(msgs(rep, "CRIT"), [])
+
     def test_quantized_conversion_does_not_cry_wolf(self):
         st = self.baseline("a.json", "safetensors", {f"model.layers.{i}.mlp.down_proj.weight":
                             hashlib.sha256(b"fp%i" % i).hexdigest() for i in range(4)},
@@ -412,6 +430,64 @@ class TestUploaderManifest(unittest.TestCase):
         self.manifest(f"{sha}  model.safetensors\n")
         rep = run(st)
         self.assertTrue(any(m.startswith("SHA-256 matches the uploader's own entry") for m in msgs(rep, "OK")))
+
+
+class TestQuantLabelTable(unittest.TestCase):
+    """A wrong GGML_FTYPE label does not fail loudly — it silently mislabels a quant and
+    then feeds the quant-vs-filename check. Pin the values that matter."""
+
+    def test_file_type_labels_match_gguf_h(self):
+        import inspect, re
+        from model_audit import check_meta
+        src = inspect.getsource(check_meta)
+        table = dict(re.findall(r"(\d+): \"([A-Z0-9_]+)\"", src))
+        self.assertEqual(table.get("32"), "BF16", "MOSTLY_BF16 is 32")
+        self.assertEqual(table.get("30"), "IQ1_M", "30 is IQ1_M, not BF16")
+        self.assertEqual(table.get("38"), "MXFP4_MOE")
+        for code in ("15", "18", "14"):  # Q4_K_M, Q6_K, Q4_K_S
+            self.assertIn(code, table, f"file_type {code} missing from the label table")
+
+
+class TestValueWidening(unittest.TestCase):
+    """The widening trick must be exact: that is what makes a value-level match a proof."""
+
+    def test_bf16_widening_reproduces_float32_bits(self):
+        import struct
+        from model_audit import _to_f32_bytes
+        raw = b"".join(struct.pack("<H", b) for b in (0x3F80, 0x0000, 0xC040, 0x1701, 0x8000))
+        widened = _to_f32_bytes(raw, "BF16")
+        got = [struct.unpack_from("<I", widened, 4 * i)[0] for i in range(5)]
+        want = [b << 16 for b in (0x3F80, 0x0000, 0xC040, 0x1701, 0x8000)]
+        self.assertEqual(got, want, "bf16 -> f32 widening must be exactly the top bits")
+        # including the sign of negative zero, which a float round-trip would lose
+        self.assertEqual(got[4], 0x80000000)
+
+    def test_f16_widening_matches_struct(self):
+        import struct
+        from model_audit import _to_f32_bytes
+        vals = (0.0, 1.0, -2.5, 65504.0, 6.103515625e-05)  # exactly f16-representable
+        raw = struct.pack(f"<{len(vals)}e", *vals)
+        self.assertEqual(struct.unpack(f"<{len(vals)}f", _to_f32_bytes(raw, "F16")), vals)
+
+    def test_f32_widening_is_identity(self):
+        from model_audit import _to_f32_bytes
+        raw = b"\x00\x01\x02\x03\xff\xfe\xfd\xfc"
+        self.assertEqual(_to_f32_bytes(raw, "F32"), raw)
+
+    def test_misaligned_chunk_is_refused_not_silently_shifted(self):
+        """Widening a stream split mid-element would shift every later value, so the
+        helper must refuse misaligned input; tensor_fingerprints carries the remainder
+        instead of letting a chunk boundary corrupt the value hash."""
+        import struct
+        from model_audit import _to_f32_bytes, tensor_fingerprints
+        raw = b"".join(struct.pack("<H", b) for b in (0x3F80, 0x0001, 0x4000, 0x0002))
+        with self.assertRaises(ValueError):
+            _to_f32_bytes(raw[:3], "BF16")
+        tmp = Path(tempfile.mkdtemp(prefix="model-audit-widen-")) / "t.bin"
+        tmp.write_bytes(raw)
+        hb, hv = tensor_fingerprints(tmp, 0, len(raw), "BF16")
+        self.assertEqual(hb, hashlib.sha256(raw).hexdigest())
+        self.assertEqual(hv, hashlib.sha256(_to_f32_bytes(raw, "BF16")).hexdigest())
 
 
 if __name__ == "__main__":

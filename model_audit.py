@@ -72,6 +72,53 @@ def sha256_at(path, offset, length):
             remaining -= len(b)
     return h.hexdigest()
 
+# dtypes whose values can be widened to f32 exactly, so the same weights compare across
+# a storage-dtype change. llama.cpp's converter upcasts bf16 norms to F32 during GGUF
+# conversion: the bytes change, the values do not, and a byte-only comparison would call
+# an honest conversion "different".
+EXPANDABLE = {"BF16": 2, "F16": 2, "F32": 4}
+
+def _to_f32_bytes(chunk, dtype):
+    """Widen a chunk of BF16/F16/F32 little-endian bytes to f32, exactly."""
+    if dtype == "F32":
+        return chunk
+    if dtype == "BF16":
+        # bf16 is the top 16 bits of an f32, so widening is a byte interleave — and it can
+        # be done with slice assignment at C speed instead of a Python loop per element.
+        out = bytearray(len(chunk) * 2)
+        out[2::4] = chunk[0::2]
+        out[3::4] = chunk[1::2]
+        return bytes(out)
+    n = len(chunk) // 2
+    return struct.pack(f"<{n}f", *struct.unpack(f"<{n}e", chunk[:2 * n]))
+
+def tensor_fingerprints(path, offset, length, dtype):
+    """Return (bytes_sha256, value_sha256_or_None) in one streaming pass.
+
+    value_sha256 is the hash of the tensor's values widened to f32, or None for dtypes
+    that cannot be widened (quantized blocks). For F32 tensors it equals the byte hash.
+    """
+    h_bytes = hashlib.sha256()
+    h_vals = hashlib.sha256() if dtype in EXPANDABLE else None
+    step = EXPANDABLE.get(dtype, 1)
+    with open(path, "rb") as f:
+        f.seek(offset)
+        remaining, leftover = length, b""
+        while remaining > 0:
+            b = f.read(min(CHUNK, remaining))
+            if not b:
+                break
+            remaining -= len(b)
+            h_bytes.update(b)
+            if h_vals is not None:
+                b = leftover + b
+                cut = len(b) - (len(b) % step)
+                h_vals.update(_to_f32_bytes(b[:cut], dtype))
+                leftover = b[cut:]
+        if h_vals is not None and leftover:
+            h_vals.update(leftover)
+    return h_bytes.hexdigest(), (h_vals.hexdigest() if h_vals else None)
+
 # ---------------- template tamper scan ----------------
 DANGEROUS = [
     (r"import\s|\bimport\b",            "jinja import"),
@@ -152,9 +199,14 @@ def check_meta(md, path, rep):
     if arch == "?":
         rep.add("WARN", "meta", "no general.architecture KV — nonstandard or stripped build")
     # quant type vs filename
-    ft_names = {0:"F32",1:"F16",2:"Q4_0",3:"Q4_1",7:"Q8_0",8:"Q5_0",9:"Q5_1",
-                10:"Q2_K",11:"Q3_K_S",12:"Q3_K_M",13:"Q3_K_L",14:"Q4_K_S",15:"Q4_K_M",
-                16:"Q5_K_S",17:"Q5_K_M",18:"Q6_K",19:"IQ2_XXS",30:"BF16",31:"MXFP4",38:"MXFP4"}
+    # ggml General.file_type values (GGML_FTYPE_* in gguf.h). A wrong entry here does not
+    # fail loudly — it silently mislabels a quant, which then feeds the quant-vs-filename
+    # check. MOSTLY_BF16 is 32; 30 is IQ1_M.
+    ft_names = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0", 8: "Q5_0", 9: "Q5_1",
+                10: "Q2_K", 11: "Q3_K_S", 12: "Q3_K_M", 13: "Q3_K_L", 14: "Q4_K_S", 15: "Q4_K_M",
+                16: "Q5_K_S", 17: "Q5_K_M", 18: "Q6_K", 19: "IQ2_XXS", 20: "IQ2_XS", 21: "IQ3_XXS",
+                23: "IQ1_S", 24: "IQ4_NL", 25: "IQ3_S", 26: "IQ3_M", 27: "IQ2_S", 28: "IQ2_M",
+                29: "IQ4_XS", 30: "IQ1_M", 32: "BF16", 34: "TQ1_0", 35: "TQ2_0", 38: "MXFP4_MOE"}
     fname_q = re.findall(r"(F16|BF16|Q8_0|Q6_K|Q5_K_M|Q5_K_S|Q4_K_M|Q4_K_S|Q3_K_[SML]|Q4_0|Q4_1|Q5_0|Q5_1|Q2_K|IQ\d_S?_?[XSML]*|MXFP4)",
                          path.name.upper())
     # file_type arrives as a single-element list from the reader; unwrap ints from lists
@@ -374,9 +426,10 @@ def check_st_config(path, rep):
         rep.add("WARN", "sidecar", f"config.json present but unreadable: {e}")
         return
     archs = cfg.get("architectures") or []
-    name = cfg.get("_name_or_path") or cfg.get("name_or_path") or path.parent.name
+    name = cfg.get("_name_or_path") or cfg.get("name_or_path")
+    name_txt = repr(name) if name else "(not stated in config.json)"
     rep.add("INFO", "meta", f"architecture={archs[0] if archs else cfg.get('model_type', '?')} "
-                            f"name={name!r} file_type={cfg.get('torch_dtype', '?')} (safetensors)")
+                            f"name={name_txt} file_type={cfg.get('torch_dtype', '?')} (safetensors)")
     for key in ("model_type", "torch_dtype", "transformers_version", "base_model",
                 "quantized_by", "converted_by", "source"):
         if cfg.get(key):
@@ -566,18 +619,22 @@ def hf_check(repo, local_sha, path, rep, revision=None):
 
 # ---------------- baseline tensor hash dump / compare ----------------
 def dump_tensor_hashes(tensors, path):
-    out = {}
+    """Per-tensor byte hashes, plus value hashes where widening to f32 is exact."""
+    out, vals = {}, {}
     for t in tensors:
-        out[t.name] = sha256_at(path, t.data_offset, t.n_bytes)
-    return out
+        dtype = getattr(t, "dtype", None) or t.tensor_type.name
+        hb, hv = tensor_fingerprints(path, t.data_offset, t.n_bytes, dtype)
+        out[t.name] = hb
+        if hv and hv != hb:  # F32 needs no separate value hash; it is the byte hash
+            vals[t.name] = hv
+    return out, vals
 
 def write_baseline(tensors, path, sha, fmt, rep):
-    hashes, shapes = dump_tensor_hashes(tensors, path), {}
-    for t in tensors:
-        shapes[t.name] = [int(d) for d in t.shape]
+    hashes, values = dump_tensor_hashes(tensors, path)
+    shapes = {t.name: [int(d) for d in t.shape] for t in tensors}
     outp = path.with_suffix(path.suffix + ".tensorhashes.json")
     outp.write_text(json.dumps({"file_sha256": sha, "format": fmt,
-                                "shapes": shapes, "tensors": hashes}, indent=1))
+                                "shapes": shapes, "tensors": hashes, "values": values}, indent=1))
     rep.add("OK", "baseline", f"per-tensor SHA-256 written to {outp}")
 
 # ---------------- main ----------------
@@ -656,34 +713,54 @@ def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None):
     rep.add("CRIT", "file", f"bad magic {magic!r} — not a GGUF or safetensors file")
 
 def blob_identity(A, B):
-    """Match weight blobs across formats by content (SHA-256), as a multiset.
+    """Match weight blobs across formats by content, as a multiset.
 
-    Tensor *names* differ between formats (model.layers.0.self_attn.q_proj vs
-    blk.0.attn_q), and so can tensor *shapes*: ggml stores 2-D dims in the opposite
-    order, so the same weights can read as [4096, 11008] on one side and
-    [11008, 4096] on the other. Bytes do not lie about content, so the match keys on
-    the hash alone — shape is reported separately, as corroboration.
+    Names differ between formats (model.layers.0.self_attn.q_proj vs blk.0.attn_q), and so
+    can storage types: ggml writes 2-D dims in the opposite order, and converters upcast
+    bf16 norms to f32. So we match in two passes — byte-identical first, then by value
+    (a tensor whose values widened to f32 hash equal to one of A's).
 
-    Returns (matched, total_in_b, shape_agreement, unmatched_names).
+    Returns (exact, value_equal, total_in_b, shape_agree_exact, numel_agree_value, unmatched).
     """
-    counts_a = {}
-    for name, h in A["tensors"].items():
-        counts_a[h] = counts_a.get(h, 0) + 1
+    exact = {}
+    for h in A["tensors"].values():
+        exact[h] = exact.get(h, 0) + 1
+    # A's value hashes, plus its byte hashes (an f32 tensor's value hash IS its byte hash)
+    pool = dict(exact)
+    for h in (A.get("values") or {}).values():
+        pool[h] = pool.get(h, 0) + 1
     shapes_a = A.get("shapes") or {}
-    shape_keys_a = {}
-    for name, h in A["tensors"].items():
-        shape_keys_a.setdefault(h, set()).add(tuple(sorted(shapes_a.get(name, []))))
+    numel_a = {}
+    for src in (A["tensors"], A.get("values") or {}):
+        for name, h in src.items():
+            n = 1
+            for d in shapes_a.get(name, []):
+                n *= d
+            numel_a.setdefault(h, set()).add(n)
     shapes_b = B.get("shapes") or {}
-    matched, shape_ok, unmatched = 0, 0, []
-    for name, h in B["tensors"].items():
-        if counts_a.get(h, 0) > 0:
-            counts_a[h] -= 1
-            matched += 1
-            if tuple(sorted(shapes_b.get(name, []))) in shape_keys_a.get(h, set()):
-                shape_ok += 1
-        else:
-            unmatched.append(name)
-    return matched, len(B["tensors"]), shape_ok, sorted(unmatched)
+    values_b = B.get("values") or {}
+    n_exact = n_value = n_shape = n_numel = 0
+    unmatched = []
+    for name, hb in B["tensors"].items():
+        numel_b = 1
+        for d in shapes_b.get(name, []):
+            numel_b *= d
+        if exact.get(hb, 0) > 0:
+            exact[hb] -= 1
+            pool[hb] -= 1
+            n_exact += 1
+            if numel_b in numel_a.get(hb, set()):
+                n_shape += 1
+            continue
+        hv = values_b.get(name, hb)
+        if pool.get(hv, 0) > 0:
+            pool[hv] -= 1
+            n_value += 1
+            if numel_b in numel_a.get(hv, set()):
+                n_numel += 1
+            continue
+        unmatched.append(name)
+    return n_exact, n_value, len(B["tensors"]), n_shape, n_numel, sorted(unmatched)
 
 
 def diff_baselines(file_a, file_b, rep):
@@ -704,24 +781,36 @@ def diff_baselines(file_a, file_b, rep):
                                 f"below instead")
         rep.add("INFO", "diff", f"name sets: {len(only_a)} only in A, {len(only_b)} only in B, "
                                 f"{len(set(ta) & set(tb))} in common (per-name listing skipped for cross-format)")
-        matched, total, shape_ok, unmatched = blob_identity(A, B)
-        if total and matched == total:
-            rep.add("OK", "diff", f"content match: all {total} weight blobs in B are byte-identical "
-                                  f"(SHA-256) to blobs in A — consistent with a lossless conversion of the "
-                                  f"same weights (naming changed, values did not)")
+        matched, value_equal, total, shape_ok, numel_ok, unmatched = blob_identity(A, B)
+        if total and matched + value_equal == total:
+            rep.add("OK", "diff", f"content match: all {total} weight blobs in B carry values identical to "
+                                  f"blobs in A ({matched} byte-identical, {value_equal} identical after a "
+                                  f"storage-type change such as a bf16 norm upcast to f32) — consistent with "
+                                  f"a lossless conversion of the same weights: naming and container changed, "
+                                  f"the numbers did not")
         else:
             rep.add("INFO", "diff", f"content match: {matched} of {total} weight blobs in B are byte-identical "
-                                    f"to blobs in A; {len(unmatched)} differ. Quantized formats transform "
+                                    f"to blobs in A, {value_equal} more carry identical values in a different "
+                                    f"storage type, and {len(unmatched)} differ. Quantized formats transform "
                                     f"values by design, so a low count means 'not comparable this way', not "
                                     f"'tampered' — only a lossless conversion is expected to match")
             for name in unmatched[:8]:
                 rep.add("INFO", "diff", f"not matched: {name}")
             if len(unmatched) > 8:
                 rep.add("INFO", "diff", f"… and {len(unmatched) - 8} more unmatched blobs")
+            if unmatched:
+                rep.add("INFO", "diff", "an unmatched blob can be a table the converter computes rather than a "
+                                        "weight (rope frequency tables), a block whose values quantization "
+                                        "transformed by design, or a genuinely different weight — this tool "
+                                        "cannot tell those apart, so it names them and stops there")
         if matched:
-            rep.add("INFO", "diff", f"shape agreement: {shape_ok} of the {matched} matched blobs also agree on "
-                                    f"shape (dimension order differs between formats, so this compares dims "
-                                    f"as a set)")
+            rep.add("INFO", "diff", f"shape agreement: {shape_ok} of the {matched} byte-identical blobs also "
+                                    f"agree on shape (dimension order differs between formats, so this compares "
+                                    f"dims as a set)")
+        if value_equal:
+            rep.add("INFO", "diff", f"value agreement: {numel_ok} of the {value_equal} value-identical blobs "
+                                    f"hold the same number of elements — the difference is the storage type, "
+                                    f"not the content")
         return
     same = len(set(ta) & set(tb)) - len(changed)
     for k in only_a:
