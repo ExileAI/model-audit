@@ -48,7 +48,8 @@ python3 report.py <file1> <file2>
 | Structure | tensor census, zero-dim blocks | header/tensor self-consistency (dtype × shape vs declared bytes), overlap, gaps, trailing bytes, shard `*.index.json` consistency |
 | Chat template | `tokenizer.chat_template` inside the file | **sidecars only**: `chat_template.jinja`, `chat_template` in `tokenizer_config.json` (all entries), conflict between the two |
 | Code execution path | — | `auto_map` in config/tokenizer_config, shipped scripts |
-| Per-tensor hashes | `--tensor-hashes` | `--tensor-hashes` (cheaper — offsets come from the header) |
+| Per-tensor hashes | `--tensor-hashes` | `--tensor-hashes` (cheaper — offsets come from the header; both record a value-level hash too, see below) |
+| Cross-format comparison | `--diff`: byte-identical blobs first, then value-identical ones (a converter upcasting bf16 norms to f32 keeps the numbers, not the bytes) | Quantized blocks are not comparable this way — the diff says so instead of guessing |
 | Remote check | `--hf`, by LFS SHA-256 first | same, any LFS-tracked file |
 | Uploader checksums | a shipped `MANIFEST.txt`/`SHA256SUMS`/`*.sha256` next to the file: does it still agree with this file, or has the file been renamed under it | nothing about safety — it is the uploader's own claim. Agreement is internal consistency; disagreement is the drift a swap leaves behind |
 
@@ -68,9 +69,11 @@ python3 report.py <file1> <file2>
   profile a quant type should produce, as a hint at post-quantization training.
 - **Baseline diff against a trusted self-quant** — localize edits to abliteration sites
   (`ffn_down`/`ffn_out`/`attn_o`) vs. spread changes (broad re-training).
-- **Conversion-chain proof** — audit an upstream safetensors tree's per-tensor hashes, then
-  check a GGUF derived from it block by block, which is the closest thing to proof that a
-  prebuilt quant came from the source it claims.
+- **Quantized lineage** — proving a Q4_K_M came from a specific fp source means re-deriving
+  the quantization: K-quant block scales are a deterministic function of the source weights,
+  so recompute them and compare against the scales stored in the file. Until then, a
+  quantized build can only be tied to its source through the tensors quantization leaves
+  untouched (norms), which the diff already reports.
 
 ---
 

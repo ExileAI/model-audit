@@ -64,11 +64,21 @@ reports/             generated output; gitignored, never commit
 - Format dispatch is by magic bytes (`GGUF`, else 8-byte length + `{` JSON), never by
   filename extension. An absurd header length must stay a *finding*, not a reason to
   call the file unrecognized.
-- Cross-format `--diff` must compare by **content** (`shape` + SHA-256, matched as a
-  multiset), never by tensor name: GGUF and safetensors name the same weights
-  differently (`blk.0.attn_q` vs `model.layers.0.self_attn.q_proj`), so a per-name
-  comparison flags an honest conversion as a different model. A low content-match count
-  is reported as "not comparable this way", not as tampering.
+- Cross-format `--diff` must compare by **content**, never by tensor name: GGUF and
+  safetensors name the same weights differently (`blk.0.attn_q` vs
+  `model.layers.0.self_attn.q_proj`), so a per-name comparison flags an honest conversion as
+  a different model. A low content-match count is reported as "not comparable this way", not
+  as tampering.
+- Baselines carry a **value-level** hash next to the byte-level one, because a converter
+  legitimately changes storage type: llama.cpp upcasts bf16 norms to f32, and the widening is
+  exact (`bf16 << 16`, verified against real files). The diff matches byte-identical blobs
+  first, then value-identical ones, and reports the split separately — never merge the two
+  counts into one number. Widening must refuse misaligned input and the streaming hasher must
+  carry a remainder across chunk boundaries; widening a split stream twice silently shifts
+  every later value.
+- Quantized blocks are not widenable, so they record no value hash and match neither way.
+  Say that in the output ("not comparable this way") rather than letting a low match count
+  read as a finding.
 - An uploader-shipped checksum file (`MANIFEST.txt`, `SHA256SUMS`, `*.sha256`) is worth
   verifying in both directions: match under the file's own name is OK; a mismatch is
   CRIT; the hash matching under a *different* name is the rename-without-change case and

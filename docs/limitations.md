@@ -52,11 +52,16 @@ eliminate it.
    text your model reads its instructions from.
 
 6. **Verify a quantized GGUF against its safetensors source.** Names and shapes can
-   always be matched against the upstream source tree. Byte-for-byte tensor hashes can
-   only be matched for *lossless* conversions (F16/F32 style) — block-quantized weights
-   (Q4_K_M and friends) are numerically transformed, so their hashes will differ by
-   design. `--diff` warns when you compare baselines made from different formats; do not
-   read those differences as tampering.
+   always be matched against the upstream source tree, and `--tensor-hashes` baselines now
+   carry a **value-level** fingerprint as well as a byte-level one, so a lossless conversion
+   is provable across a storage-type change: llama.cpp upcasts bf16 norms to f32, which
+   changes the bytes while preserving the numbers exactly (verified at the bit level — the
+   f32 value is `bf16 << 16`). A real source→BF16 pair matched on 666 of 667 tensors this
+   way, the outlier being a table the converter computes.
+   Block-quantized weights (Q4_K_M and friends) are numerically transformed by design, so
+   their blobs match neither way — only the tensors quantization leaves untouched (norms,
+   usually) still tie the build to its source. `--diff` warns when you compare baselines made
+   from different formats; do not read those differences as tampering.
 
 ## What strong verification actually looks like
 
