@@ -1,12 +1,98 @@
 # model-audit
 
-Supply-chain auditor for (abliterated) model artifacts. Born from the observation that
-"uncensored" builds from small uploaders are exactly where a hostile actor would hide
-tampering — and the average user has no way to check.
+[![self-test](https://github.com/ExileAI/model-audit/actions/workflows/test.yml/badge.svg)](https://github.com/ExileAI/model-audit/actions/workflows/test.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 
-Audits **GGUF** and **safetensors** files. The format is auto-detected from the file's
-first bytes; no flag, no library needed for safetensors (stdlib only). (Renamed from
-`gguf-audit`, which the GitHub redirect still resolves.)
+**Before you run a model someone else made, check what's inside it.**
+
+`model-audit` is a supply-chain auditor for model files. You point it at a `.gguf` or
+`.safetensors` file you downloaded, and it tells you whether anything hostile is hiding
+in it — a booby-trapped chat template, hidden instructions, a file that claims to be one
+thing but is another — then prints a plain-language report you can actually read.
+
+It exists because "uncensored" builds from small uploaders are exactly where a hostile
+actor would hide tampering, and the average user has no way to check.
+
+- Audits **GGUF** *and* **safetensors** — the format is auto-detected from the file's
+  first bytes; no flag to remember.
+- `.safetensors` auditing needs **no extra packages** (standard-library reader only).
+- The report is written for non-technical readers, not for security engineers.
+- Nothing here phones home, and nothing is uploaded: it reads the file you already have.
+
+> **Not comfortable with a terminal?** You need three commands, they are copy-paste
+> below, and the report opens in your web browser like any other web page. That's the
+> whole workflow.
+
+*(Renamed from `gguf-audit`; the GitHub redirect still resolves.)*
+
+## Install (one time)
+
+```bash
+git clone https://github.com/ExileAI/model-audit.git
+cd model-audit
+pip install -r requirements.txt
+```
+
+That's the whole install. You need `python3` (3.8 or newer; CI runs 3.11). The
+`pip install` pulls in the GGUF library and the Hugging Face client used by `--hf` — if
+you only audit `.safetensors` files you can skip it entirely.
+
+## Quick start
+
+**1 — Audit one file** (works out of the box, prints findings to the terminal):
+
+```bash
+python3 model_audit.py ~/Downloads/my-model.gguf
+```
+
+**2 — Or get a readable report** (writes an HTML file you open in your browser):
+
+```bash
+python3 report.py ~/Downloads/my-model.gguf
+```
+
+The report lands in the `reports/` folder. Open it the way you'd open any web page —
+double-click it, or drag it into your browser. Everything below is an optional extra.
+
+### Worked examples — both formats
+
+Copy-paste, with made-up names. **GGUF** (a single file):
+
+```bash
+# audit a quantized GGUF
+python3 model_audit.py ~/Downloads/Example-7B-Uncensored-Q4_K_M.gguf
+
+# same file, as a readable report saved to reports/
+python3 report.py ~/Downloads/Example-7B-Uncensored-Q4_K_M.gguf
+```
+
+**safetensors** (a weights file plus its sidecars in the same folder):
+
+```bash
+# keep the sidecars beside the weights — the chat template lives in
+# chat_template.jinja / tokenizer_config.json, and the audit reads them there
+python3 model_audit.py ~/Downloads/Example-7B-Uncensored/model.safetensors
+
+python3 report.py ~/Downloads/Example-7B-Uncensored/model.safetensors
+```
+
+> **Using LM Studio?** Your models already live under `~/.lmstudio/models/<uploader>/<repo>/`.
+> Point the commands straight at the file there, or `cd` into that folder first.
+
+### What the verdict means
+
+Every file gets one of three banners, in plain language:
+
+| banner | in one line |
+|---|---|
+| ✅ **NO RED FLAGS FOUND** | nothing hostile was found in the file |
+| ⚠️ **USE WITH AWARENESS** | read the warnings — many are harmless, from tool-calling models |
+| 🛑 **DO NOT RUN THIS FILE** | a critical problem was found — delete or quarantine it |
+
+"No red flags" means nothing hostile was found — it is **not** a promise the weights are
+safe, and **not** a statement about the uploader. See `docs/reading-a-report.md` for a
+full plain-language walkthrough, and `examples/` for real sample reports.
 
 ## Layout
 - `model_audit.py` — core scanner (CLI, scriptable, exit codes 0/1/2)
@@ -24,7 +110,8 @@ first bytes; no flag, no library needed for safetensors (stdlib only). (Renamed 
 - `examples/` — committed **sample** reports so you can see what to expect before
   you run anything, plus the scripts that regenerate them (`examples/README.md`)
 
-## Usage
+## Full usage
+
 ```bash
 # full audit of one file (GGUF or safetensors)
 python3 model_audit.py <file.gguf>
@@ -50,6 +137,9 @@ python3 model_audit.py --diff <model.safetensors>.tensorhashes.json \
 
 # human-readable HTML report (one per file, plain language)
 python3 report.py <file1> <file2>
+
+# print the tool version
+python3 model_audit.py --version
 ```
 
 ## Exit codes
@@ -64,12 +154,12 @@ per-tensor diff mode (`--diff`) uses the same scale.
 
 ## Sample reports
 `examples/` holds committed reports generated from real files, so you can see the
-output before running anything:
+output before running anything (click to open):
 
-- `report-01-clean-gemma-12b-obliterated` — **NO RED FLAGS**
-- `report-02-warn-mxfp4-anonymous` — **USE WITH AWARENESS**
-- `report-03-aeon-pair-two-uploaders` — two uploaders, one "AEON" lineage
-- `report-04-do-not-run-template-swap` — **DO NOT RUN**, produced by swapping the
+- [`report-01-clean-gemma-12b-obliterated`](examples/report-01-clean-gemma-12b-obliterated.html) — **NO RED FLAGS**
+- [`report-02-warn-mxfp4-anonymous`](examples/report-02-warn-mxfp4-anonymous.html) — **USE WITH AWARENESS**
+- [`report-03-aeon-pair-two-uploaders`](examples/report-03-aeon-pair-two-uploaders.html) — two uploaders, one "AEON" lineage
+- [`report-04-do-not-run-template-swap`](examples/report-04-do-not-run-template-swap.html) — **DO NOT RUN**, produced by swapping the
   chat template of an otherwise clean model for a hostile one. The weights are
   fine; the sample shows what a single replaced string does to the verdict.
 
@@ -119,6 +209,8 @@ See `examples/README.md` for a plain-language walkthrough of each.
   so recompute them and compare against the scales stored in the file. Until then, a
   quantized build can only be tied to its source through the tensors quantization leaves
   untouched (norms), which the diff already reports.
+- **Remote-only audit** — audit a Hugging Face repo's file list and hashes straight from the
+  API, without downloading multi-GB files.
 
 ## Changelog
 Newest first. Each entry is a commit on `master` (`git show <sha>` for the diff).
