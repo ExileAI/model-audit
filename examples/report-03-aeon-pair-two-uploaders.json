@@ -1,0 +1,97 @@
+[
+  {
+    "file": "vcruz305/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-GGUF/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-Q4_K_M.gguf",
+    "findings": [
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "vcruz305/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-GGUF/Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED-Q4_K_M.gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "sha256=d4396fed4df6c4994cf5ee0177c47180a60a58b734ad5470ac7ac88b12f1ddb7"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "size=16,810,715,168"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "format=gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "architecture=qwen35 name='Qwen3.8-27B-AEON-ULTIMATE-UNCENSORED' file_type=[15]"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "quant=Q4_K_M"
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "866 tensors total"
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "83 tensors sit at common abliteration edit sites (ffn_down/ffn_out/attn_o, or down_proj/o_proj in HF naming) \u2014 diff these against a trusted build"
+      }
+    ]
+  },
+  {
+    "file": "Abiray/Qwen3.6-27B-AEON-Ultimate-Uncensored-GGUF/qwen3.6-27b-uncensored-q4_k_s.gguf",
+    "findings": [
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "Abiray/Qwen3.6-27B-AEON-Ultimate-Uncensored-GGUF/qwen3.6-27b-uncensored-q4_k_s.gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "sha256=a532f946eb37ca5d51b9748f79b8e510c06fb106a285d9f26439b301b7d950ed"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "size=15,586,306,272"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "format=gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "architecture=qwen35 name='Raw_Model' file_type=[14]"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "quant=Q4_K_S"
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "851 tensors total"
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "81 tensors sit at common abliteration edit sites (ffn_down/ffn_out/attn_o, or down_proj/o_proj in HF naming) \u2014 diff these against a trusted build"
+      },
+      {
+        "severity": "INFO",
+        "section": "sidecar",
+        "message": "config file present (card-vs-file mismatch possible): tokenizer_config.json"
+      }
+    ]
+  }
+]

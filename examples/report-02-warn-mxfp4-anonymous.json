@@ -1,0 +1,57 @@
+[
+  {
+    "file": "uncensored-20b-mxfp4.gguf",
+    "findings": [
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "uncensored-20b-mxfp4.gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "sha256=04109404f1f8e7cc056a8501a4fbf3639772dbea991b04d43f4e5fd989e57965"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "size=12,109,565,888"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "format=gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "architecture=gpt-oss name='GPT-OSS-20B-Uncensored-REDACTED-MXFP4-Aggressive' file_type=[38]"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "quant=MXFP4_MOE"
+      },
+      {
+        "severity": "WARN",
+        "section": "template",
+        "message": "file I/O wording: ... page. \" }}         {{- \"type open = (_: { \" }}         {{- \"id?..."
+      },
+      {
+        "severity": "WARN",
+        "section": "template",
+        "message": "environment/config access: ...n a stateful Jupyter notebook environment. python will respond with the..."
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "459 tensors total"
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "97 tensors sit at common abliteration edit sites (ffn_down/ffn_out/attn_o, or down_proj/o_proj in HF naming) \u2014 diff these against a trusted build"
+      }
+    ]
+  }
+]

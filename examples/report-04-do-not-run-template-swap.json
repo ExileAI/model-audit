@@ -1,0 +1,57 @@
+[
+  {
+    "file": "Gemma-4-12B-OBLITERATED-demo-tampered-template.gguf",
+    "findings": [
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "Gemma-4-12B-OBLITERATED-demo-tampered-template.gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "sha256=74f8e704a61f3897c868c9bc0712a61f940377ae4c324ae53b2a94bf7f6ad506"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "size=7,381,365,376"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "format=gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "architecture=gemma4 name='Gemma-4-12B-OBLITERATED-v2' file_type=[15]"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "quant=Q4_K_M"
+      },
+      {
+        "severity": "CRIT",
+        "section": "template",
+        "message": "5 zero-width/invisible chars embedded in template (0x200b, 0x200c, 0x200d, 0x2060)"
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "667 tensors total"
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "96 tensors sit at common abliteration edit sites (ffn_down/ffn_out/attn_o, or down_proj/o_proj in HF naming) \u2014 diff these against a trusted build"
+      },
+      {
+        "severity": "INFO",
+        "section": "sidecar",
+        "message": "config file present (card-vs-file mismatch possible): config.json"
+      }
+    ]
+  }
+]

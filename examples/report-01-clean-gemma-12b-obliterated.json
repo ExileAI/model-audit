@@ -1,0 +1,52 @@
+[
+  {
+    "file": "OBLITERATUS/Gemma-4-12B-OBLITERATED/Gemma-4-12B-OBLITERATED-v2-Q4_K_M.gguf",
+    "findings": [
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "OBLITERATUS/Gemma-4-12B-OBLITERATED/Gemma-4-12B-OBLITERATED-v2-Q4_K_M.gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "sha256=f5b01d65562305cad661d9ec83bd63220c101fec5355fa78fb6a27ba85116eb4"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "size=7,381,382,208"
+      },
+      {
+        "severity": "INFO",
+        "section": "file",
+        "message": "format=gguf"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "architecture=gemma4 name='Gemma-4-12B-OBLITERATED-v2' file_type=[15]"
+      },
+      {
+        "severity": "INFO",
+        "section": "meta",
+        "message": "quant=Q4_K_M"
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "667 tensors total"
+      },
+      {
+        "severity": "INFO",
+        "section": "tensors",
+        "message": "96 tensors sit at common abliteration edit sites (ffn_down/ffn_out/attn_o, or down_proj/o_proj in HF naming) \u2014 diff these against a trusted build"
+      },
+      {
+        "severity": "INFO",
+        "section": "sidecar",
+        "message": "config file present (card-vs-file mismatch possible): config.json"
+      }
+    ]
+  }
+]

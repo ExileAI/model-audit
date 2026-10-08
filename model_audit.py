@@ -30,6 +30,8 @@ try:
 except ImportError:  # safetensors auditing needs no third-party packages at all
     gguf = None
 
+VERSION = "0.4.0"
+
 # ---------------- findings collector ----------------
 class Report:
     def __init__(self):
@@ -850,6 +852,7 @@ def cmd_diff(args):
 
 def main():
     ap = argparse.ArgumentParser(description="audit a GGUF or safetensors file for supply-chain tampering")
+    ap.add_argument("--version", action="version", version=f"model-audit {VERSION}")
     ap.add_argument("model", type=Path, nargs="?", help="model file to audit (GGUF or safetensors; format auto-detected)")
     ap.add_argument("--tensor-hashes", action="store_true", help="emit per-tensor SHA-256 baseline JSON")
     ap.add_argument("--hf", metavar="USER/REPO", help="cross-check local sha256 against HF LFS hash")

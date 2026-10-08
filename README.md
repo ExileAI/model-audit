@@ -18,8 +18,11 @@ first bytes; no flag, no library needed for safetensors (stdlib only). (Renamed 
 - `tests/test_report.py` — report rendering: no dropped findings, no internal jargon
 - `docs/limitations.md` — what the audit can and cannot prove (read before changing claims)
 - `docs/safe-workflow.md` — the download → pin → audit → baseline recipe
-- `reports/` — generated audit reports (HTML + JSON); gitignored, never commit
+- `docs/reading-a-report.md` — plain-language guide to the report, for non-technical readers
+- `reports/` — your generated audit reports (HTML + JSON); gitignored
 - `baselines/` — per-tensor fingerprint baselines for comparison; gitignored
+- `examples/` — committed **sample** reports so you can see what to expect before
+  you run anything, plus the scripts that regenerate them (`examples/README.md`)
 
 ## Usage
 ```bash
@@ -48,6 +51,29 @@ python3 model_audit.py --diff <model.safetensors>.tensorhashes.json \
 # human-readable HTML report (one per file, plain language)
 python3 report.py <file1> <file2>
 ```
+
+## Exit codes
+| code | meaning |
+|---|---|
+| `0` | clean — no CRIT and no WARN |
+| `1` | findings — at least one WARN (or a `--diff` reported changes), no CRIT |
+| `2` | hard error / **DO NOT RUN** — a CRIT finding, or a file that could not be read |
+
+Both scripts expose `--version`. Scripts and CI can branch on the exit code; the
+per-tensor diff mode (`--diff`) uses the same scale.
+
+## Sample reports
+`examples/` holds committed reports generated from real files, so you can see the
+output before running anything:
+
+- `report-01-clean-gemma-12b-obliterated` — **NO RED FLAGS**
+- `report-02-warn-mxfp4-anonymous` — **USE WITH AWARENESS**
+- `report-03-aeon-pair-two-uploaders` — two uploaders, one "AEON" lineage
+- `report-04-do-not-run-template-swap` — **DO NOT RUN**, produced by swapping the
+  chat template of an otherwise clean model for a hostile one. The weights are
+  fine; the sample shows what a single replaced string does to the verdict.
+
+See `examples/README.md` for a plain-language walkthrough of each.
 
 ## What each format is checked for
 

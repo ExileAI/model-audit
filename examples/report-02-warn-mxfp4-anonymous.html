@@ -1,0 +1,92 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>Model Audit Report</title><style>
+body { font-family: -apple-system, 'Segoe UI', sans-serif; max-width: 980px;
+       margin: 0 auto; padding: 24px; color: #1a1a2e; background: #fafafa; }
+h1 { border-bottom: 3px solid #2c3e50; padding-bottom: 8px; }
+.fileblock { background: #fff; border: 1px solid #d5d8dc; border-radius: 10px;
+             padding: 20px 24px; margin: 24px 0; }
+.verdict { border-left: 6px solid; padding: 10px 16px; margin: 14px 0; background: #f8f9fa; border-radius: 4px; }
+.vtitle { font-size: 1.35em; font-weight: 700; }
+.vtext { color: #444; margin-top: 4px; }
+.vaction { margin-top: 8px; padding: 8px 12px; background: #fff; border: 1px dashed #bbb;
+           border-radius: 6px; font-size: 0.92em; }
+.meta td { padding: 4px 12px 4px 0; font-size: 0.9em; color: #555; }
+.mono { font-family: monospace; word-break: break-all; }
+.findings { width: 100%; border-collapse: collapse; margin-top: 12px; }
+.findings td { padding: 10px 8px; border-top: 1px solid #eee; vertical-align: top; }
+.badge { color: #fff; font-size: 0.72em; font-weight: 700; padding: 3px 8px; border-radius: 10px; white-space: nowrap; }
+.sec { font-weight: 600; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.4px; color: #666; }
+.msg { font-family: monospace; font-size: 0.88em; margin-top: 3px; word-break: break-word; }
+.plain { font-size: 0.92em; color: #333; margin: 6px 0 0; background: #f4f6f7; padding: 8px 10px; border-radius: 6px; }
+tr.crit td:first-child { border-left: 4px solid #c0392b; }
+tr.warn td:first-child { border-left: 4px solid #d68910; }
+tr.ok td:first-child { border-left: 4px solid #1e8449; }
+.foot { color: #777; font-size: 0.85em; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 12px; }
+.summary { display: flex; gap: 16px; margin: 20px 0; }
+.sumitem { flex: 1; background: #fff; border: 1px solid; border-left-width: 6px; border-radius: 8px;
+           padding: 12px 16px; text-align: center; }
+.sumnum { display: block; font-size: 1.8em; font-weight: 800; }
+.sumitem { color: #555; font-size: 0.85em; }
+.idcard td { font-size: 0.95em; }
+</style></head><body>
+<h1>🛡️ Model Audit Report</h1>
+<p class="foot" style="border:none;margin-top:0">1 file audited · generated 2026-10-08 16:04 by model-audit v0.4.0</p>
+
+
+    <section class="fileblock">
+      <h2>uncensored-20b-mxfp4.gguf</h2>
+      <div class="verdict" style="border-color:#d68910">
+        <div class="vtitle" style="color:#d68910">USE WITH AWARENESS</div>
+        <div class="vtext">Warnings mean something needs your attention, but the file isn't clearly hostile. Read the details below.</div>
+        <div class="vaction"><b>▶ What to do: read each warning's explanation below — some are false positives from tool-calling models. If the model matters to you, run <code>python3 model_audit.py &lt;file&gt; --tensor-hashes</code> to save a per-weight fingerprint baseline.</b></div>
+      </div>
+      
+      <table class="meta idcard">
+        <tr><td>Format</td><td>gguf</td></tr>
+        <tr><td>Model type</td><td>gpt-oss · quant MXFP4_MOE</td></tr>
+        
+        <tr><td>Chat template</td><td style="color:#d68910;font-weight:600">⚠️ SUSPICIOUS PATTERNS — READ BELOW</td></tr>
+        
+      </table>
+      <table class="meta">
+        <tr><td>SHA-256 fingerprint</td><td class="mono">04109404f1f8e7cc056a8501a4fbf3639772dbea991b04d43f4e5fd989e57965</td></tr>
+        <tr><td>Size</td><td>12,109,565,888 bytes</td></tr>
+      </table>
+      <table class="findings">
+        <tr class="warn">
+          <td><span class="badge" style="background:#d68910">WARNING</span></td>
+          <td><span class="sec">Chat template</span>
+              <div class="msg">file I/O wording: ... page. &quot; }}         {{- &quot;type open = (_: { &quot; }}         {{- &quot;id?...</div><p class="plain">The template mentions file reading/writing. Can be a false positive in models with tool-calling (they legitimately talk about &#x27;files&#x27; as conversation topics), but worth reading the context.</p></td>
+        </tr>
+        <tr class="warn">
+          <td><span class="badge" style="background:#d68910">WARNING</span></td>
+          <td><span class="sec">Chat template</span>
+              <div class="msg">environment/config access: ...n a stateful Jupyter notebook environment. python will respond with the...</div><p class="plain">The template reaches for environment or configuration data.</p></td>
+        </tr>
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Metadata</span>
+              <div class="msg">architecture=gpt-oss name=&#x27;GPT-OSS-20B-Uncensored-REDACTED-MXFP4-Aggressive&#x27; file_type=[38]</div></td>
+        </tr>
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Metadata</span>
+              <div class="msg">quant=MXFP4_MOE</div></td>
+        </tr>
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Weights</span>
+              <div class="msg">459 tensors total</div></td>
+        </tr>
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Weights</span>
+              <div class="msg">97 tensors sit at common abliteration edit sites (ffn_down/ffn_out/attn_o, or down_proj/o_proj in HF naming) — diff these against a trusted build</div></td>
+        </tr></table>
+    </section>
+<p class="foot"><b>What this report can and cannot tell you:</b> these checks read the file's
+metadata, chat template, and structure. They prove what the file <i>claims</i> to be and whether
+anything hostile hides in the instructions it carries. They cannot prove the mathematical weights
+themselves are free of subtle tampering — for that, generate per-tensor fingerprints
+(<code>--tensor-hashes</code>) and compare against a build you trust.</p>
+</body></html>

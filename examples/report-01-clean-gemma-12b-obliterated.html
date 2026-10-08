@@ -1,0 +1,87 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>Model Audit Report</title><style>
+body { font-family: -apple-system, 'Segoe UI', sans-serif; max-width: 980px;
+       margin: 0 auto; padding: 24px; color: #1a1a2e; background: #fafafa; }
+h1 { border-bottom: 3px solid #2c3e50; padding-bottom: 8px; }
+.fileblock { background: #fff; border: 1px solid #d5d8dc; border-radius: 10px;
+             padding: 20px 24px; margin: 24px 0; }
+.verdict { border-left: 6px solid; padding: 10px 16px; margin: 14px 0; background: #f8f9fa; border-radius: 4px; }
+.vtitle { font-size: 1.35em; font-weight: 700; }
+.vtext { color: #444; margin-top: 4px; }
+.vaction { margin-top: 8px; padding: 8px 12px; background: #fff; border: 1px dashed #bbb;
+           border-radius: 6px; font-size: 0.92em; }
+.meta td { padding: 4px 12px 4px 0; font-size: 0.9em; color: #555; }
+.mono { font-family: monospace; word-break: break-all; }
+.findings { width: 100%; border-collapse: collapse; margin-top: 12px; }
+.findings td { padding: 10px 8px; border-top: 1px solid #eee; vertical-align: top; }
+.badge { color: #fff; font-size: 0.72em; font-weight: 700; padding: 3px 8px; border-radius: 10px; white-space: nowrap; }
+.sec { font-weight: 600; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.4px; color: #666; }
+.msg { font-family: monospace; font-size: 0.88em; margin-top: 3px; word-break: break-word; }
+.plain { font-size: 0.92em; color: #333; margin: 6px 0 0; background: #f4f6f7; padding: 8px 10px; border-radius: 6px; }
+tr.crit td:first-child { border-left: 4px solid #c0392b; }
+tr.warn td:first-child { border-left: 4px solid #d68910; }
+tr.ok td:first-child { border-left: 4px solid #1e8449; }
+.foot { color: #777; font-size: 0.85em; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 12px; }
+.summary { display: flex; gap: 16px; margin: 20px 0; }
+.sumitem { flex: 1; background: #fff; border: 1px solid; border-left-width: 6px; border-radius: 8px;
+           padding: 12px 16px; text-align: center; }
+.sumnum { display: block; font-size: 1.8em; font-weight: 800; }
+.sumitem { color: #555; font-size: 0.85em; }
+.idcard td { font-size: 0.95em; }
+</style></head><body>
+<h1>🛡️ Model Audit Report</h1>
+<p class="foot" style="border:none;margin-top:0">1 file audited · generated 2026-10-08 16:04 by model-audit v0.4.0</p>
+
+
+    <section class="fileblock">
+      <h2>Gemma-4-12B-OBLITERATED-v2-Q4_K_M.gguf</h2>
+      <div class="verdict" style="border-color:#1e8449">
+        <div class="vtitle" style="color:#1e8449">NO RED FLAGS FOUND</div>
+        <div class="vtext">Nothing hostile was detected. Note: this audit can't prove weights are 'good' — only that nothing obviously bad was found in metadata and the chat template. Per-weight fingerprints (tensor hashes) are needed to compare against a trusted build.</div>
+        <div class="vaction"><b>▶ What to do: if this model matters to you, save a fingerprint baseline now: <code>python3 model_audit.py &lt;file&gt; --tensor-hashes</code>. Keep the JSON next to the model — it lets you prove later that the weights haven't changed.</b></div>
+      </div>
+      
+      <table class="meta idcard">
+        <tr><td>Format</td><td>gguf</td></tr>
+        <tr><td>Model type</td><td>gemma4 · quant Q4_K_M</td></tr>
+        
+        <tr><td>Chat template</td><td style="color:#1e8449;font-weight:600">✅ CLEAN</td></tr>
+        
+      </table>
+      <table class="meta">
+        <tr><td>SHA-256 fingerprint</td><td class="mono">f5b01d65562305cad661d9ec83bd63220c101fec5355fa78fb6a27ba85116eb4</td></tr>
+        <tr><td>Size</td><td>7,381,382,208 bytes</td></tr>
+      </table>
+      <table class="findings">
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Metadata</span>
+              <div class="msg">architecture=gemma4 name=&#x27;Gemma-4-12B-OBLITERATED-v2&#x27; file_type=[15]</div></td>
+        </tr>
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Metadata</span>
+              <div class="msg">quant=Q4_K_M</div></td>
+        </tr>
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Weights</span>
+              <div class="msg">667 tensors total</div></td>
+        </tr>
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Weights</span>
+              <div class="msg">96 tensors sit at common abliteration edit sites (ffn_down/ffn_out/attn_o, or down_proj/o_proj in HF naming) — diff these against a trusted build</div></td>
+        </tr>
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Sidecar files</span>
+              <div class="msg">config file present (card-vs-file mismatch possible): config.json</div></td>
+        </tr></table>
+    </section>
+<p class="foot"><b>What this report can and cannot tell you:</b> these checks read the file's
+metadata, chat template, and structure. They prove what the file <i>claims</i> to be and whether
+anything hostile hides in the instructions it carries. They cannot prove the mathematical weights
+themselves are free of subtle tampering — for that, generate per-tensor fingerprints
+(<code>--tensor-hashes</code>) and compare against a build you trust.</p>
+</body></html>

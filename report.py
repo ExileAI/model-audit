@@ -264,7 +264,7 @@ tr.ok td:first-child { border-left: 4px solid #1e8449; }
 .idcard td { font-size: 0.95em; }
 """
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 def generate(models, outdir):
     outdir.mkdir(parents=True, exist_ok=True)
@@ -311,6 +311,7 @@ themselves are free of subtle tampering — for that, generate per-tensor finger
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--version", action="version", version=f"model-audit report {VERSION}")
     ap.add_argument("models", nargs="+")
     ap.add_argument("-o", "--outdir", type=Path, default=Path(__file__).parent / "reports")
     a = ap.parse_args()
