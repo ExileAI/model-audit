@@ -120,6 +120,26 @@ See `examples/README.md` for a plain-language walkthrough of each.
   quantized build can only be tied to its source through the tensors quantization leaves
   untouched (norms), which the diff already reports.
 
+## Changelog
+Newest first. Each entry is a commit on `master` (`git show <sha>` for the diff).
+
+| commit | change |
+|---|---|
+| `cc17289` | **v0.4.0** — sample reports committed in `examples/`; `--version` on both scripts; `docs/reading-a-report.md` |
+| `7184447` | gitignore: ignore `*.safetensors` and `*.safetensors.index.json` |
+| `81e4569` | report: show the audited format, fix dead provenance rows, drop internal jargon |
+| `e501a5b` | docs: layout, conversion-comparison usage, and the workflow step |
+| `da55e18` | docs: value-level comparison and what a quantized build can still be tied to |
+| `0aebb59` | value-level fingerprints: prove a lossless conversion through a dtype change |
+| `cc929ee` | cross-format content match: key on bytes, report shape separately |
+| `7677f4d` | verify uploader-supplied checksum files |
+| `d7d3a58` | cross-format diff: compare by content, not by name |
+| `59d1260` | add safetensors support |
+| `6750cc6` | attribution: Exile → ExileAI |
+| `95d4631` | rename `gguf-audit` → `model-audit` |
+| `bc8c3d7` | CI: run scanner self-tests on every push/PR |
+| `5d2e45a` | initial release: GGUF supply-chain auditor |
+
 ---
 
 **model-audit** — created by ExileAI, 2026. MIT licensed.
