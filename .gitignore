@@ -4,3 +4,5 @@ reports/
 baselines/
 *.tensorhashes.json
 *.gguf
+*.safetensors
+*.safetensors.index.json
