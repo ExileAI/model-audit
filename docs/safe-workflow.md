@@ -13,8 +13,8 @@ Two or three "no" answers → treat the file as untrusted no matter what any aud
 
 ## 1. At download: pin and record
 
-Record three things in a note next to the model — the moment you download is the only
-time you can pin history:
+Record three things in a note next to the model — recording the resolved commit at download preserves the
+snapshot you intended to compare:
 
 ```
 repo:     <uploader>/<model-name>
@@ -29,14 +29,15 @@ python3 model_audit.py model.gguf --hf <uploader>/<repo> --revision <commit_sha>
 python3 model_audit.py model.gguf --tensor-hashes
 ```
 
-- The first command proves your copy is what the repo published at that commit.
+- A successful first check establishes a byte match to the identified remote file
+  at that commit; a failed or unavailable lookup does not.
   (It works the same for `model.safetensors` — the format is auto-detected.)
 - If the repo ships its own hash list (`MANIFEST.txt`, `SHA256SUMS`, `*.sha256`), the
   audit checks your file against it and tells you if the file was renamed after hashing.
   A mismatch under the file's own name is a red flag.
 - The second writes `model.gguf.tensorhashes.json` — the per-weight fingerprint.
-  **Keep it next to the model, forever.** It is your evidence that the weights you
-  run today are the weights you audited today.
+  **Keep that original reference.** Existing destinations are refused rather than
+  overwritten. This fingerprints the audited bytes; it does not prove the weights safe.
 
 Read the report. CRIT findings → do not load the model, full stop. Warnings → read
 each explanation; tool-calling models trip "file I/O"-style patterns legitimately.
@@ -51,10 +52,10 @@ on their own, so hash them alongside the weights:
 sha256sum model.safetensors *.jinja tokenizer_config.json config.json > SIDECARS.sha256
 ```
 
-The audit already scans every one of those templates for hostile content — but the
+The audit scans supported template representations for known suspicious patterns — but the
 hash is what lets you prove later that the file you read is still the file in place.
 
-### 2c. If you have the source tree, prove the conversion
+### 2c. Compare source and converted fingerprint evidence
 
 When a build ships both the fp/bf16 source and a converted GGUF, fingerprint both and
 compare across formats:
@@ -65,10 +66,11 @@ python3 model_audit.py model-Q8_0.gguf   --tensor-hashes
 python3 model_audit.py --diff model.safetensors.tensorhashes.json model-Q8_0.gguf.tensorhashes.json
 ```
 
-- A **lossless** conversion matches on every blob: byte-identical where the container type
-  is the same, and value-identical where the converter changed only the storage type (bf16
-  norms widened to f32 keep their numbers exactly). That is the strongest statement this
-  tool can make about provenance: the build carries the weights of a tree you audited.
+- Byte matches and normalized-hash candidates are counted separately, consuming each
+  source and destination tensor at most once. Both unmatched sides are reported. The
+  current baseline lacks dtype and byte-order evidence, so normalized matches are
+  inconclusive; even a complete fingerprint match does not prove a lossless conversion
+  or correct tensor-role mapping.
 - A **quantized** build matches only on the tensors quantization leaves untouched (usually
   the norms). The rest is reported as "not comparable this way" — quantization transforms
   values by design, so that is not a red flag.
@@ -77,7 +79,17 @@ python3 model_audit.py --diff model.safetensors.tensorhashes.json model-Q8_0.ggu
 
 ## 3. Whenever you re-download or copy the model
 
-Re-run both commands. The `--tensor-hashes` JSON now pays off:
+Preserve the original baseline and write a distinct new one:
+
+```bash
+python3 model_audit.py model.gguf --hf <uploader>/<repo> --revision <original_commit_sha>
+python3 model_audit.py model.gguf --tensor-hashes --baseline-out model.new.json
+python3 model_audit.py --diff model.gguf.tensorhashes.json model.new.json
+```
+
+Choose a fresh destination for each snapshot; neither output replaces your reference.
+Finding exit codes are expected when differences or warnings are present. Read the
+findings rather than treating exit 1/2 as successful verification.
 
 - Same file SHA-256 → identical copy.
 - Different SHA-256 but you need to know *what* changed → compare tensor baselines
@@ -94,8 +106,9 @@ Re-run both commands. The `--tensor-hashes` JSON now pays off:
 - Never enable `trust_remote_code` for a model you have not read. If the audit reports
   `auto_map` in `config.json` or `tokenizer_config.json`, the repo ships Python that
   your loader will execute — that is code you are running, not weights you are loading.
-- Re-check the repo occasionally: if the pinned revision's files change upstream,
-  your copy is now the only honest one — and the uploader has some explaining to do.
+- Retain the full resolved upstream commit. A mismatch or unavailable reference
+  needs investigation; it alone does not prove a force-push, malicious replacement,
+  or that either copy is honest.
 
 ## What this workflow still cannot do
 

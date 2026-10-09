@@ -183,11 +183,11 @@ class TestStructuralTampering(SAFETENSORS_BASE):
         self.assertTrue(any("tensor layout:" in m for m in msgs(rep, "CRIT")),
                         "overlapping tensor regions not caught")
 
-    def test_empty_tensor_is_warned(self):
+    def test_empty_tensor_is_informational(self):
         self.file.write_bytes(build([("model.embed_tokens.weight", "F32", [0], b"")]
                                     + honest_tensors()[1:]))
         rep = run(self.file)
-        self.assertTrue(any("is empty" in m for m in msgs(rep, "WARN")))
+        self.assertTrue(any("is empty" in m for m in msgs(rep, "INFO")))
 
 
 class TestSidecarAttacks(SAFETENSORS_BASE):
@@ -279,6 +279,8 @@ class TestIndexConsistency(SAFETENSORS_BASE):
                         "a tensor added after indexing went unreported")
 
 
+# Baselines lack dtype/endianness: tests assert matching counts, not the former
+# unsupported lossless-conversion or shape-equivalence prose.
 class TestCrossFormatDiff(unittest.TestCase):
     """GGUF and safetensors name the same weights differently, so a per-name diff is
     not meaningful across formats. The content match must carry it instead — and it
@@ -312,7 +314,7 @@ class TestCrossFormatDiff(unittest.TestCase):
         gg = self.baseline("b.json", "gguf", {f"blk.{i}.attn_q.weight": v for i, v in enumerate(h.values())},
                            {f"blk.{i}.attn_q.weight": [8, 1] for i in range(3)})
         rep = self.run_diff(st, gg)
-        self.assertTrue(any(m.startswith("content match: all 3 weight blobs") for m in msgs(rep, "OK")),
+        self.assertTrue(any(m.startswith("content match: 3 of 3") for m in msgs(rep, "INFO")),
                         "a lossless conversion was not recognised as content-identical")
         self.assertEqual(msgs(rep, "CRIT"), [], "legitimate cross-format conversion raised CRIT")
 
@@ -329,9 +331,9 @@ class TestCrossFormatDiff(unittest.TestCase):
         gg = self.baseline("b.json", "gguf", {"blk.0.attn_norm.weight": f32_hash},
                            {"blk.0.attn_norm.weight": [3840]})
         rep = self.run_diff(st, gg)
-        self.assertTrue(any(m.startswith("content match: all 1 weight blob") for m in msgs(rep, "OK")),
+        self.assertTrue(any("0 of 1" in m and "1 normalized-hash candidates" in m for m in msgs(rep, "INFO")),
                         "an upcast norm was not matched by value")
-        self.assertTrue(any("1 identical after a storage-type change" in m for m in msgs(rep, "OK")))
+        self.assertTrue(any("INCONCLUSIVE" in m for m in msgs(rep, "INFO")))
         self.assertEqual(msgs(rep, "CRIT"), [])
 
     def test_quantized_conversion_does_not_cry_wolf(self):
@@ -354,9 +356,9 @@ class TestCrossFormatDiff(unittest.TestCase):
         gg = self.baseline("b.json", "gguf", {"blk.0.ffn_up.weight": "d" * 64},
                            {"blk.0.ffn_up.weight": [11008, 4096]})
         rep = self.run_diff(st, gg)
-        self.assertTrue(any(m.startswith("content match: all 1 weight blob") for m in msgs(rep, "OK")),
+        self.assertTrue(any(m.startswith("content match: 1 of 1") for m in msgs(rep, "INFO")),
                         "a lossless conversion with reversed dims was not matched by content")
-        self.assertTrue(any("shape agreement: 1 of the 1" in m for m in msgs(rep, "INFO")))
+        self.assertFalse(any("shape agreement:" in m for m in msgs(rep)))  # Shape/role equivalence is not proved by hashes.
 
     def test_same_format_diff_still_classifies_changes(self):
         a = self.baseline("a.json", "gguf", {"blk.0.ffn_down.weight": "a" * 64},

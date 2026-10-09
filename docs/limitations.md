@@ -9,10 +9,10 @@ eliminate it.
 |---|---|---|
 | SHA-256 (local) | This exact byte stream is what you hashed | That those bytes are safe |
 | `--hf` remote check | Your copy matches what the repo publishes **at that moment/revision** | That the repo's copy was ever safe — you inherit whatever trust the uploader has |
-| `--revision` pin | Match against a specific, immutable commit | Anything about commits *before* it; a repo can publish poison at v1 and swap at v2 |
+| `--revision` pin | A full resolved commit identifies a snapshot; symbolic refs remain mutable | Anything about commits *before* it; a repo can publish poison at v1 and swap at v2 |
 | Template scan | The chat instructions carried inside the file contain no (detected) hostile code, hidden chars, or exfiltration patterns | That the scanner's pattern list is complete. Novel attacks evading these signatures will pass |
 | Metadata checks | Internal labels agree with filename claims; provenance KVs exist | That the labels are truthful — an uploader can set `general.name` to anything |
-| Tensor census | Structure is complete and sane (no missing/empty blocks) | That tensor *values* are what they should be |
+| Tensor census | Implemented inventory checks completed; legal empty tensors remain valid | That tensor *values* are what they should be |
 | safetensors header checks | The header parses, its declared lengths fit the file, each tensor's dtype × shape equals its declared byte span, spans never overlap, and no bytes are unaccounted for (gap or trailing data) | That the weights are what the header says — the header is text the uploader wrote. A perfectly self-consistent file can be a perfectly tampered one |
 | Template sidecar scan (safetensors) | The templates shipped next to the weights (`chat_template.jinja`, every `chat_template` entry in `tokenizer_config.json`) contain no (detected) hostile code, and two disagreeing sources are flagged | That those are the templates that will actually be used — your app may supply its own — or that the pattern list is complete |
 | `*.index.json` check | The shard description matches the shard it describes (weights present, `total_size` right) | That the other shards in the set, or the tensors' contents, are honest |
@@ -34,7 +34,7 @@ eliminate it.
 
 3. **See upstream history that was never pinned.** If nobody recorded the commit SHA
    (or the pre-conversion safetensors state) at download time, a force-push is
-   invisible in hindsight. HF is not git — history can simply vanish. This is why the
+   invisible in hindsight. A remote reference may become unavailable; a failed lookup alone does not establish why. This is why the
    workflow is: pin the commit **at download**, hash immediately, re-check against the
    pin later.
 
@@ -51,17 +51,20 @@ eliminate it.
    re-check them on every re-download. A clean weights hash says nothing about the
    text your model reads its instructions from.
 
-6. **Verify a quantized GGUF against its safetensors source.** Names and shapes can
-   always be matched against the upstream source tree, and `--tensor-hashes` baselines now
-   carry a **value-level** fingerprint as well as a byte-level one, so a lossless conversion
-   is provable across a storage-type change: llama.cpp upcasts bf16 norms to f32, which
-   changes the bytes while preserving the numbers exactly (verified at the bit level — the
-   f32 value is `bf16 << 16`). A real source→BF16 pair matched on 666 of 667 tensors this
-   way, the outlier being a table the converter computes.
-   Block-quantized weights (Q4_K_M and friends) are numerically transformed by design, so
-   their blobs match neither way — only the tensors quantization leaves untouched (norms,
-   usually) still tie the build to its source. `--diff` warns when you compare baselines made
-   from different formats; do not read those differences as tampering.
+6. **Prove model equivalence or conversion history with anonymous hashes.**
+   The existing baseline records bytes, shapes, and optional normalized hashes,
+   not dtype, byte order, or semantic tensor roles. Cross-format comparison counts
+   each tensor once and reports byte matches separately from inconclusive
+   normalized-hash candidates. Even full correspondence does not prove numerical
+   equivalence, a correct conversion, or historical provenance. Quantized values
+   usually do not match; that alone is not evidence of tampering.
+
+7. **Guarantee one immutable snapshot or bounded hostile-input resource use.**
+   Audit stable completed files. Exact-range hashing rejects short reads, but
+   separate reads are not an atomic snapshot against a concurrent writer. Sidecar
+   size budgets, parser isolation, and hostile-directory confinement are not
+   provided. GGUF template inspection is embedded-only; index inspection is
+   limited to the selected local shard, not a complete bundle validation.
 
 ## What strong verification actually looks like
 
@@ -78,8 +81,10 @@ The gold standard, in order:
 
 ## Practical guidance from verdicts
 
-- `DO NOT RUN` — hostile template or structural breakage found. Don't load it.
+- `DO NOT RUN` — a critical signal, invalid input, or hard failure needs resolution.
+  This is a conservative action recommendation, not proof of malicious intent.
 - `USE WITH AWARENESS` — read the specific warnings. Tool-calling models trip
   "file I/O" style patterns legitimately; the explanation text tells you when.
-- `NO RED FLAGS` — the file is honest about what it is, **not** that it is safe.
-  For anything you care about, generate `--tensor-hashes` and keep them.
+- `NO RED FLAGS` — completed checks found no known suspicious patterns. Read the
+  coverage/rubric for anything absent or uninspected. This proves neither honesty
+  nor safety. Preserve a baseline if comparison matters.

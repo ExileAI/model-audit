@@ -2,14 +2,14 @@
 
 [![self-test](https://github.com/ExileAI/model-audit/actions/workflows/test.yml/badge.svg)](https://github.com/ExileAI/model-audit/actions/workflows/test.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 
 **Before you run a model someone else made, check what's inside it.**
 
 `model-audit` is a supply-chain auditor for model files. You point it at a `.gguf` or
-`.safetensors` file you downloaded, and it tells you whether anything hostile is hiding
-in it — a booby-trapped chat template, hidden instructions, a file that claims to be one
-thing but is another — then prints a plain-language report you can actually read.
+`.safetensors` file you downloaded, and reports known suspicious patterns, inconsistent metadata, and structural
+problems in the inputs it successfully inspects. It then prints a plain-language
+report; it cannot establish that a model is safe.
 
 It exists because "uncensored" builds from small uploaders are exactly where a hostile
 actor would hide tampering, and the average user has no way to check.
@@ -18,7 +18,8 @@ actor would hide tampering, and the average user has no way to check.
   first bytes; no flag to remember.
 - `.safetensors` auditing needs **no extra packages** (standard-library reader only).
 - The report is written for non-technical readers, not for security engineers.
-- Nothing here phones home, and nothing is uploaded: it reads the file you already have.
+- Local checks read your files without uploading them. The optional `--hf` check
+  queries Hugging Face metadata for the repository you specify.
 
 > **Not comfortable with a terminal?** You need three commands, they are copy-paste
 > below, and the report opens in your web browser like any other web page. That's the
@@ -34,7 +35,7 @@ cd model-audit
 pip install -r requirements.txt
 ```
 
-That's the whole install. You need `python3` (3.8 or newer; CI runs 3.11). The
+That's the whole install. You need `python3` (3.10 or newer; CI runs 3.11). The
 `pip install` pulls in the GGUF library and the Hugging Face client used by `--hf` — if
 you only audit `.safetensors` files you can skip it entirely.
 
@@ -52,7 +53,8 @@ python3 model_audit.py ~/Downloads/my-model.gguf
 python3 report.py ~/Downloads/my-model.gguf
 ```
 
-The report lands in the `reports/` folder. Open it the way you'd open any web page —
+The HTML/JSON pair lands in a unique run directory under `reports/`; the CLI prints
+the HTML path. Finding exit codes 1 and 2 can accompany a successfully written report. Open it the way you'd open any web page —
 double-click it, or drag it into your browser. Everything below is an optional extra.
 
 ### Worked examples — both formats
@@ -86,11 +88,11 @@ Every file gets one of three banners, in plain language:
 
 | banner | in one line |
 |---|---|
-| ✅ **NO RED FLAGS FOUND** | nothing hostile was found in the file |
+| ✅ **NO RED FLAGS FOUND** | no known suspicious patterns in the inputs successfully inspected |
 | ⚠️ **USE WITH AWARENESS** | read the warnings — many are harmless, from tool-calling models |
 | 🛑 **DO NOT RUN THIS FILE** | a critical problem was found — delete or quarantine it |
 
-"No red flags" means nothing hostile was found — it is **not** a promise the weights are
+"No red flags" describes only completed checks — it is **not** a promise the weights are
 safe, and **not** a statement about the uploader. See `docs/reading-a-report.md` for a
 full plain-language walkthrough, and `examples/` for real sample reports.
 
@@ -117,8 +119,10 @@ full plain-language walkthrough, and `examples/` for real sample reports.
 python3 model_audit.py <file.gguf>
 python3 model_audit.py <model.safetensors>
 
-# also write per-tensor SHA-256 baseline (for comparing builds)
+# write a baseline without replacing an existing reference
 python3 model_audit.py <file> --tensor-hashes
+# after a re-download, preserve the original and choose a new destination
+python3 model_audit.py <file> --tensor-hashes --baseline-out model.new.json
 
 # cross-check local hash against the Hugging Face repo it came from
 python3 model_audit.py <file> --hf <uploader>/<repo> --revision <commit_sha>
@@ -129,7 +133,7 @@ for f in /path/to/models/*/*.gguf; do python3 model_audit.py "$f"; done
 # compare two tensor-fingerprint baselines (see docs/safe-workflow.md)
 python3 model_audit.py --diff model.old.json model.new.json
 
-# did this build come from that source tree? audit both, then compare across formats
+# compare fingerprint evidence across formats (not proof of conversion history)
 python3 model_audit.py <model.safetensors> --tensor-hashes    # the source
 python3 model_audit.py <model-Q8_0.gguf> --tensor-hashes      # the derived build
 python3 model_audit.py --diff <model.safetensors>.tensorhashes.json \
@@ -151,6 +155,31 @@ python3 model_audit.py --version
 
 Both scripts expose `--version`. Scripts and CI can branch on the exit code; the
 per-tensor diff mode (`--diff`) uses the same scale.
+
+## Evidence rubric
+
+HTML and JSON include four dimensions: **Structure**, **Template inspection**,
+**Provenance evidence**, and **Baseline comparison**. Each records PASS, CONCERN,
+FAIL, NOT CHECKED, or justified N/A, with a reason and scope. Requested-check
+coverage is shown separately as COMPLETE or INCOMPLETE. There is no numeric safety
+score: four passes would still not prove safe weights.
+
+- PASS is scoped agreement or a completed inspection, never automatic uploader trust
+- CONCERN means suspicious or inconclusive evidence, not a proven attack
+- FAIL means an established invalid structure or unambiguous reference mismatch
+- NOT CHECKED distinguishes absent, unrequested, failed, and incomplete inspection
+- N/A requires a specific exemption, such as an embedded template in a clip/mmproj file
+
+Finding severity remains independent: a critical signature can show CONCERN in the
+rubric while retaining exit 2. Optional unrequested checks do not change exit status.
+Same-format baseline agreement covers bytes and recorded shapes only; dtype, byte
+order, and tensor roles remain NOT VERIFIED. Generating a baseline is not comparing
+one. See [the report guide](docs/reading-a-report.md).
+
+The core `--json` output remains one findings array. Reports retain `file` and
+`findings`, with additive rubric data. Existing baseline files remain readable;
+baseline writes now refuse existing destinations. Use `--baseline-out` for a new
+snapshot and retain the original reference.
 
 ## Sample reports
 `examples/` holds committed reports generated from real files, so you can see the
@@ -175,23 +204,23 @@ See `examples/README.md` for a plain-language walkthrough of each.
 | Chat template | `tokenizer.chat_template` inside the file | **sidecars only**: `chat_template.jinja`, `chat_template` in `tokenizer_config.json` (all entries), conflict between the two |
 | Code execution path | — | `auto_map` in config/tokenizer_config, shipped scripts |
 | Per-tensor hashes | `--tensor-hashes` | `--tensor-hashes` (cheaper — offsets come from the header; both record a value-level hash too, see below) |
-| Cross-format comparison | `--diff`: byte-identical blobs first, then value-identical ones (a converter upcasting bf16 norms to f32 keeps the numbers, not the bytes) | Quantized blocks are not comparable this way — the diff says so instead of guessing |
+| Cross-format comparison | `--diff`: one-to-one byte matches, then explicitly inconclusive normalized-hash candidates | Quantized blocks are not comparable this way — the diff says so instead of guessing |
 | Remote check | `--hf`, by LFS SHA-256 first | same, any LFS-tracked file |
 | Uploader checksums | a shipped `MANIFEST.txt`/`SHA256SUMS`/`*.sha256` next to the file: does it still agree with this file, or has the file been renamed under it | nothing about safety — it is the uploader's own claim. Agreement is internal consistency; disagreement is the drift a swap leaves behind |
 
 ## Threat model & limits
-- Metadata/template/structure checks catch: hostile chat templates, hidden instructions,
-  label mismatches, missing provenance, sidecar executables, remote file swaps, and
-  self-contradicting or appended-to file structures.
+- Metadata/template/structure checks look for known suspicious signatures, label
+  mismatches, missing provenance, sidecar executables, reference mismatches, and
+  contradictory file structures. Incomplete checks are not a clean result.
 - A safetensors header is text the uploader wrote. It agreeing with the file's length and
   with itself proves consistency, not safety — the weights themselves are still unaudited.
 - Per-tensor hashes catch: swapped or edited weight blocks **when compared against a
   trusted baseline of the same base model**.
-- A baseline also answers one provenance question directly: whether a conversion was
-  lossless. A source → derived pair matches on byte-identical blobs *and* on value-identical
-  blobs (a converter upcasting bf16 norms to f32 preserves the numbers, not the bytes), so
-  `--diff` can show a build carries the same weights as a tree you audited — and it says
-  outright when a comparison is not meaningful (block-quantized weights).
+- Baselines retain byte and recorded-shape evidence. Cross-format comparison consumes
+  each tensor at most once and reports both unmatched sides. Normalized-hash matches
+  are candidates, not proof of equal numerical values: the existing baseline format
+  does not record dtype or byte order. Tensor roles, model equivalence, and conversion
+  history remain unverified.
 - A shipped checksum list (`MANIFEST.txt`, `SHA256SUMS`) is checked against the file, in both
   directions: agreement is internal consistency, a mismatch under the file's own name is a
   red flag, and the hash appearing under a *different* name means the file was renamed
@@ -206,9 +235,8 @@ See `examples/README.md` for a plain-language walkthrough of each.
   (`ffn_down`/`ffn_out`/`attn_o`) vs. spread changes (broad re-training).
 - **Quantized lineage** — proving a Q4_K_M came from a specific fp source means re-deriving
   the quantization: K-quant block scales are a deterministic function of the source weights,
-  so recompute them and compare against the scales stored in the file. Until then, a
-  quantized build can only be tied to its source through the tensors quantization leaves
-  untouched (norms), which the diff already reports.
+  so recompute them and compare against the scales stored in the file. Until then, matching
+  unchanged tensors provide limited fingerprint evidence, not proof of a source lineage.
 - **Remote-only audit** — audit a Hugging Face repo's file list and hashes straight from the
   API, without downloading multi-GB files.
 

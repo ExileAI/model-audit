@@ -7,14 +7,36 @@ and writes a plain-language HTML report (plus machine-readable JSON) to reports/
 Usage:
     python3 report.py <file1> [file2 ...] [-o reports/]
 """
-import argparse, json, sys, html
+import argparse, json, sys, html, tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from model_audit import Report, audit as _audit
+from model_audit import Report, audit as _audit, evidence_rubric
 
 # plain-language translations for every finding we emit
 PLAIN = {
+    "audit failed": "The audit stopped because an operation failed. Some requested checks may not "
+        "have run, so this report cannot supply a complete result for the file.",
+    "input error": "An input could not be read or validated, or an output could not be written. "
+        "Resolve the reported problem and rerun the requested check.",
+    "template invalid": "A template source could not be read or did not have the expected text "
+        "structure. Its instructions were not fully inspected; other readable sources do not "
+        "make this missing coverage complete.",
+    "template coverage incomplete": "No readable template was available for the requested scan. "
+        "The application may supply one at runtime, and its instructions remain outside this audit.",
+    "template sources for": "Files provide different text for the same named template. The loader "
+        "chooses which source to use at runtime, so review both and resolve unintended differences.",
+    "tensor entry invalid dtype or shape": "A weight entry uses an invalid type or shape description. "
+        "The file's header does not describe that weight in the required format.",
+    "baseline refused": "A fingerprint baseline could not be saved because the required structural "
+        "checks did not validate the tensor data. Resolve those findings before creating a baseline.",
+    "baseline comparison incomplete": "A baseline is missing comparison information or contains no "
+        "weights. Matching the information that remains cannot establish a complete comparison.",
+    "TENSOR CONTENT CHANGED": "The recorded bytes for a weight block differ between the baselines. "
+        "This identifies a difference, not its cause or whether either version is safe.",
+    "TENSOR SHAPE CHANGED": "The recorded dimensions of a weight block differ between the baselines. "
+        "Review whether this change was intended; the comparison does not determine its cause.",
     "No tokenizer.chat_template": (
         "This file has NO chat template inside it. The template is what tells the model "
         "how to hold a conversation — without one baked in, whatever app you load it with "
@@ -33,8 +55,8 @@ PLAIN = {
     "exec/OS wording": "The template mentions running programs or OS commands. Like the above: often legitimate "
         "tool-calling vocabulary, but the surrounding text should make sense.",
     "environment/config access": "The template reaches for environment or configuration data.",
-    "suspicious namespace() usage": "The template abuses a template feature in a way that references system "
-        "objects — not a pattern honest templates use.",
+    "suspicious namespace() usage": "The template uses a feature to reference system "
+        "objects. This deserves review for unintended access or code execution.",
     "zero-width": "Invisible characters are hidden in the template. These can smuggle instructions past a human "
         "reviewer or alter model behavior without any visible change.",
     "confusable": "The template contains look-alike characters (e.g. Cyrillic 'а' inside English text). "
@@ -46,20 +68,21 @@ PLAIN = {
         "At best sloppy labeling; at worst misrepresentation.",
     "no general.architecture": "The file doesn't even say what kind of model it is — nonstandard or stripped build.",
     "executable/script shipped alongside": "A program/script ships in the same folder as the model. The model "
-        "weights are safe data — anything executable next to them is a separate supply-chain risk. Don't run it.",
-    "SHA-256 MISMATCH": "The file's fingerprint does NOT match what the Hugging Face repo currently publishes — "
-        "it was swapped, re-uploaded, or this copy didn't come from the repo.",
+        "weights do not establish what this program does. Executables next to them are a separate "
+        "supply-chain risk; review them before running anything.",
+    "SHA-256 MISMATCH": "The file's fingerprint does not match the selected Hugging Face reference. "
+        "That establishes a difference, not why the difference exists or whether either copy is safe.",
     "MANIFEST MISMATCH": "The uploader published a list of hashes with this model, and this file does not match "
         "the entry under its own name. Either the file was changed after it was hashed, or it was replaced. "
         "Treat that file as untrustworthy until the uploader explains it.",
-    "renamed since the manifest was written": "The uploader's own hash list still has this file under its old "
-        "name, and the content matches. That is a rename without a content change — harmless in itself, and it "
-        "shows the hash list is still accurate.",
+    "renamed since the manifest was written": "These bytes match a checksum listed under another name. "
+        "That does not establish rename history or validate the whole checksum list.",
     "present but no readable SHA-256 lines": "A checksum file ships with this model but this tool could not "
         "read any hashes out of it.",
     "but this file is not listed in it": "A checksum file ships with this model but does not cover this file, "
         "so it can say nothing about it either way.",
-    "local SHA-256 matches HF LFS": "The file's fingerprint matches what Hugging Face publishes right now.",
+    "local SHA-256 matches HF LFS": "The file's fingerprint matches the Hugging Face reference that was checked. "
+        "Matching bytes do not establish that the uploader or weights are trustworthy.",
     "per-tensor SHA-256 written": "A per-weight-block fingerprint baseline was saved for future comparison.",
     "config file present": "A config file sits next to the model; its chat settings could differ from what's "
         "inside the GGUF. If they disagree, trust the GGUF.",
@@ -81,8 +104,10 @@ PLAIN = {
         "the file's internal map is broken.",
     "tensor entry has nonsensical offsets": "A weight entry declares an impossible data range (it ends "
         "before it starts, or starts before zero).",
-    "tensor size:": "A weight block's declared size does not match what its type and shape require. The "
-        "header contradicts itself, which is what a hand-edited or grafted file looks like.",
+    "is not a known type": "This tool does not recognize the declared data type, so its byte size "
+        "could not be verified. This is an incomplete check, not a demonstrated contradiction.",
+    "tensor size:": "This finding concerns the declared type, shape, or byte range of a weight block. "
+        "Read the details to distinguish a mismatch from an unperformed check; the cause is not established.",
     "tensor layout:": "Two weight blocks claim the same bytes — the file's layout is not a valid "
         "safetensors layout.",
     "undeclared gap": "There is a stretch of data inside the file that no header entry claims. It could be "
@@ -102,9 +127,9 @@ PLAIN = {
         "the claim comes from the uploader — nothing here verifies how they were made.",
     "index mismatch": "The index file that describes a multi-shard model disagrees with this shard: it "
         "lists weights that are not here, or misses weights that are. Shards and index must match exactly.",
-    "template sidecar": "This template file sits next to the weights and is what actually shapes the "
-        "conversation. A slow, careful review of this one small file covers the same attack surface as "
-        "reviewing the whole model.",
+    "template sidecar": "This template file sits next to the weights and may shape the "
+        "conversation when a loader chooses it. Reviewing it covers the instructions in that file, "
+        "not the model weights or templates supplied by another application.",
     "no chat template sidecar": "This format never carries the chat template inside the file, and no "
         "template sidecar is present. Whatever you load the model with supplies the template, so its "
         "behavior is not pinned by anything you audited here.",
@@ -118,9 +143,9 @@ PLAIN = {
         "corrupt, truncated, or not really a GGUF.",
     "bad magic": "The file's first bytes match no known model format — it is not a GGUF or safetensors "
         "file, whatever its name says.",
-    "comparing a": "These two fingerprints were made from different formats (for example a GGUF against a "
-        "safetensors file). Names and precision differ between formats, so the differences listed below are "
-        "expected and the verdict is not meaningful.",
+    "comparing a": "The baselines use different formats or lack format information. Names, storage "
+        "types, and numerical representations may differ. Matching normalized fingerprints are only "
+        "candidates for further review; they do not establish numeric equivalence or a lossless conversion.",
 }
 
 SEV_COLOR = {"CRIT": "#c0392b", "WARN": "#d68910", "INFO": "#5d6d7e", "OK": "#1e8449"}
@@ -132,36 +157,71 @@ SECTION_LABELS = {
     "st-header": "File header", "st-tensors": "Weight structure", "index": "Shard index",
     "manifest": "Uploader checksum", "sidecar": "Sidecar files", "provenance": "Provenance",
     "remote": "Remote check", "baseline": "Fingerprint baseline", "diff": "Comparison",
-    "audit": "Audit",
+    "audit": "Audit", "rubric": "Evidence coverage",
 }
 
 def plain_for(sev, sec, msg):
     for k, v in PLAIN.items():
         if msg.startswith(k) or k in msg[:40] or k in msg:
             return v
+    if sev in ("CRIT", "WARN"):
+        return ("This check found a problem or could not finish. Read the detail above and the "
+                "evidence coverage below to see what was established and what remains unknown.")
     return ""
+
 
 def verdict(crits, warns):
     if crits:
-        return ("DO NOT RUN THIS FILE", SEV_COLOR["CRIT"],
-                "Critical findings mean this file is unsafe or untrustworthy as-is.",
-                "What to do: delete or quarantine this file. If you want this model, get it from "
-                "a source that documents its quantization (or quantize it yourself), then re-audit.")
+        return ("CRITICAL FINDINGS: REVIEW BEFORE LOADING", SEV_COLOR["CRIT"],
+                "A check found a critical problem or the audit could not complete. "
+                "The details establish the issue, not the intent behind it.",
+                "What to do: review the critical findings before loading this file. Resolve "
+                "unreadable files, structural problems, or suspicious instructions and re-audit.")
     if warns:
-        return ("USE WITH AWARENESS", SEV_COLOR["WARN"],
-                "Warnings mean something needs your attention, but the file isn't clearly hostile. Read the details below.",
-                "What to do: read each warning's explanation below — some are false positives from "
-                "tool-calling models. If the model matters to you, run <code>python3 model_audit.py "
-                "&lt;file&gt; --tensor-hashes</code> to save a per-weight fingerprint baseline.")
-    return ("NO RED FLAGS FOUND", SEV_COLOR["OK"],
-            "Nothing hostile was detected. Note: this audit can't prove weights are 'good' — "
-            "only that nothing obviously bad was found in metadata and the chat template. "
-            "Per-weight fingerprints (tensor hashes) are needed to compare against a trusted build.",
-            "What to do: if this model matters to you, save a fingerprint baseline now: "
-            "<code>python3 model_audit.py &lt;file&gt; --tensor-hashes</code>. Keep the JSON next "
-            "to the model — it lets you prove later that the weights haven't changed.")
+        return ("WARNINGS: REVIEW THE DETAILS", SEV_COLOR["WARN"],
+                "Warnings identify differences, risks, or incomplete checks that need attention.",
+                "What to do: read each warning and its scope below. Some template patterns can "
+                "be legitimate tool-calling vocabulary; a finding alone does not prove hostile intent.")
+    return ("NO RED FLAGS IN COMPLETED CHECKS", SEV_COLOR["OK"],
+            "No warning or critical findings were reported in the checks that completed. "
+            "See the evidence coverage below for checks that were unavailable or not requested. "
+            "This result does not prove that the model weights are benign.",
+            "What to do: compare fingerprints against a reference you trust when available. "
+            "Matching fingerprints establish consistency with that reference, not safety.")
 
-def render_file_block(name, items):
+
+RUBRIC_LABELS = {"structure": "Structure", "templates": "Templates",
+                 "provenance": "Provenance", "baseline": "Baseline"}
+
+
+def render_rubric(rubric):
+    """Render the shared evidence contract without inferring checks from findings."""
+    rows = []
+    for key, label in RUBRIC_LABELS.items():
+        evidence = rubric["domains"][key]
+        rows.append(f"""<tr>
+          <th scope="row">{label}</th>
+          <td>{html.escape(evidence['status'])}</td>
+          <td>{html.escape(evidence['reason'])}</td>
+          <td>{html.escape(evidence['scope'])}</td>
+        </tr>""")
+    coverage = rubric["coverage"]
+    return f"""
+      <h3>Evidence coverage</h3>
+      <p class="coverage"><b>Requested coverage: {html.escape(coverage['status'])}</b><br>
+        {html.escape(coverage['reason'])}<br>
+        <span class="coverage-scope">Scope: {html.escape(coverage['scope'])}</span></p>
+      <table class="rubric">
+        <thead><tr><th>Domain</th><th>Status</th><th>Reason</th><th>Scope</th></tr></thead>
+        <tbody>{''.join(rows)}</tbody>
+      </table>"""
+
+
+def render_file_block(name, items, rubric=None):
+    if rubric is None:
+        rep = Report()
+        rep.items = list(items)
+        rubric = evidence_rubric(rep)
     crits = sum(1 for s, *_ in items if s == "CRIT")
     warns = sum(1 for s, *_ in items if s == "WARN")
     v, color, vt, action = verdict(crits, warns)
@@ -195,26 +255,15 @@ def render_file_block(name, items):
                 if sec == "file" and m.startswith("format=")), "")
     prov = [m for m in id_rows if "architecture=" not in m]
     tpl_findings = [(s, m) for s, sec, m in items if sec == "template"]
-    tpl_crits = sum(1 for s, _ in tpl_findings if s == "CRIT")
-    tpl_warns = sum(1 for s, _ in tpl_findings if s == "WARN")
     tpl_sources = [m.split("template sidecar: ", 1)[1].split(" (")[0] for s, m in tpl_findings
                    if s == "INFO" and m.startswith("template sidecar: ")]
-    if tpl_crits:
-        tpl_verdict, tpl_color = "❌ HOSTILE PATTERNS FOUND", SEV_COLOR["CRIT"]
-    elif any("no chat template sidecar" in m.lower() for s, m in tpl_findings):
-        tpl_verdict, tpl_color = "➖ NO SIDECAR TEMPLATE FOUND", SEV_COLOR["WARN"]
-    elif any("no chat template" in m.lower() or "no tokenizer.chat_template" in m for s, m in tpl_findings):
-        tpl_verdict, tpl_color = "➖ NONE BAKED INTO FILE", SEV_COLOR["WARN"]
-    elif tpl_warns:
-        tpl_verdict, tpl_color = "⚠️ SUSPICIOUS PATTERNS — READ BELOW", SEV_COLOR["WARN"]
-    else:
-        tpl_verdict, tpl_color = "✅ CLEAN", SEV_COLOR["OK"]
+    tpl_verdict = rubric["domains"]["templates"]["status"]
     idcard = f"""
       <table class="meta idcard">
         {f'<tr><td>Format</td><td>{html.escape(fmt)}</td></tr>' if fmt else ''}
         <tr><td>Model type</td><td>{html.escape(arch)}{(' · quant ' + html.escape(quant)) if quant else ''}</td></tr>
         {''.join(f'<tr><td>{html.escape(m.split("=")[0].strip().replace("general.",""))}</td><td>{html.escape(m.split("=",1)[1].strip())}</td></tr>' for m in prov)}
-        <tr><td>Chat template</td><td style="color:{tpl_color};font-weight:600">{tpl_verdict}</td></tr>
+        <tr><td>Chat template</td><td>{html.escape(tpl_verdict)}</td></tr>
         {f'<tr><td>Template source</td><td class="mono">{html.escape(", ".join(tpl_sources))}</td></tr>' if tpl_sources else ''}
       </table>"""
     return f"""
@@ -230,6 +279,7 @@ def render_file_block(name, items):
         <tr><td>SHA-256 fingerprint</td><td class="mono">{html.escape(meta.get('sha256','?'))}</td></tr>
         <tr><td>Size</td><td>{html.escape(meta.get('size','?'))} bytes</td></tr>
       </table>
+      {render_rubric(rubric)}
       <table class="findings">{''.join(rows)}</table>
     </section>"""
 
@@ -262,35 +312,49 @@ tr.ok td:first-child { border-left: 4px solid #1e8449; }
 .sumnum { display: block; font-size: 1.8em; font-weight: 800; }
 .sumitem { color: #555; font-size: 0.85em; }
 .idcard td { font-size: 0.95em; }
+.rubric { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+.rubric td, .rubric th { text-align: left; vertical-align: top; padding: 8px;
+                       border: 1px solid #ddd; overflow-wrap: anywhere; }
+.rubric thead { background: #f4f6f7; }
+.coverage { font-size: 0.92em; line-height: 1.5; }
+.coverage-scope { color: #555; }
 """
 
 VERSION = "0.4.0"
 
-def generate(models, outdir):
-    outdir.mkdir(parents=True, exist_ok=True)
+def _generate(models, outdir):
+    """Return the completed HTML path and worst audit severity (0, 1, or 2)."""
+    models = list(models)
+    outdir = Path(outdir)
     blocks, all_json = [], []
     tally = {"CRIT": 0, "WARN": 0, "OK": 0}
+    status = 0
     for g in models:
         rep = Report()
         try:
             _audit(Path(g), rep)
         except Exception as e:
             rep.add("CRIT", "audit", f"audit failed: {e}")
+            rep.observe("structure", "NOT CHECKED",
+                        "Audit failed; requested checks may be incomplete", str(g))
         name = Path(g).name
-        crits_n = sum(1 for s, *_ in rep.items if s == "CRIT")
-        warns_n = sum(1 for s, *_ in rep.items if s == "WARN")
-        tally["CRIT" if crits_n else ("WARN" if warns_n else "OK")] += 1
-        blocks.append(render_file_block(name, rep.items))
+        file_status = rep.exit_code()
+        status = max(status, file_status)
+        tally[{0: "OK", 1: "WARN", 2: "CRIT"}[file_status]] += 1
+        rubric = evidence_rubric(rep)
+        blocks.append(render_file_block(name, rep.items, rubric))
         all_json.append({"file": str(g),
                          "findings": [{"severity": s, "section": sec, "message": m}
-                                      for s, sec, m in rep.items]})
-    stamp = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M")
+                                      for s, sec, m in rep.items],
+                         "rubric": rubric})
+    now = datetime.now(timezone.utc)
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S UTC")
     n = len(models)
     summary = f"""
     <div class="summary">
-      <div class="sumitem" style="border-color:{SEV_COLOR['CRIT']}"><span class="sumnum" style="color:{SEV_COLOR['CRIT']}">{tally['CRIT']}</span>do not run</div>
-      <div class="sumitem" style="border-color:{SEV_COLOR['WARN']}"><span class="sumnum" style="color:{SEV_COLOR['WARN']}">{tally['WARN']}</span>use with awareness</div>
-      <div class="sumitem" style="border-color:{SEV_COLOR['OK']}"><span class="sumnum" style="color:{SEV_COLOR['OK']}">{tally['OK']}</span>no red flags</div>
+      <div class="sumitem" style="border-color:{SEV_COLOR['CRIT']}"><span class="sumnum" style="color:{SEV_COLOR['CRIT']}">{tally['CRIT']}</span>critical findings</div>
+      <div class="sumitem" style="border-color:{SEV_COLOR['WARN']}"><span class="sumnum" style="color:{SEV_COLOR['WARN']}">{tally['WARN']}</span>warnings</div>
+      <div class="sumitem" style="border-color:{SEV_COLOR['OK']}"><span class="sumnum" style="color:{SEV_COLOR['OK']}">{tally['OK']}</span>no warning or critical findings</div>
     </div>"""
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Model Audit Report</title><style>{CSS}</style></head><body>
@@ -298,21 +362,62 @@ def generate(models, outdir):
 <p class="foot" style="border:none;margin-top:0">{n} file{'s' if n != 1 else ''} audited · generated {stamp} by model-audit v{VERSION}</p>
 {summary if n > 1 else ''}
 {''.join(blocks)}
-<p class="foot"><b>What this report can and cannot tell you:</b> these checks read the file's
-metadata, chat template, and structure. They prove what the file <i>claims</i> to be and whether
-anything hostile hides in the instructions it carries. They cannot prove the mathematical weights
-themselves are free of subtle tampering — for that, generate per-tensor fingerprints
-(<code>--tensor-hashes</code>) and compare against a build you trust.</p>
+<p class="foot"><b>What this report can and cannot tell you:</b> these checks inspect available
+metadata, template text, and file structure within the scope shown above. Pattern matches are
+review signals; their presence does not prove hostile intent, and their absence does not exclude
+unknown attacks. Metadata claims are self-reported. Hash matches establish consistency with a
+particular reference, not trust in its author or safety of the mathematical weights. Baseline
+comparisons must use an appropriate trusted reference and cannot establish that weights are benign.</p>
 </body></html>"""
-    out = outdir / f"audit-report-{stamp.replace(' ', '_').replace(':', '')}.html"
-    out.write_text(doc)
-    (outdir / (out.stem + ".json")).write_text(json.dumps(all_json, indent=2))
-    return out
+    # Serialize before creating outputs. Each invocation owns an exclusively created
+    # directory, so frozen clocks and concurrent runs cannot overwrite older evidence.
+    payload = json.dumps(all_json, indent=2)
+    outdir.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix=now.strftime("audit-report-%Y%m%dT%H%M%SZ-"),
+                                    dir=outdir))
+    out = run_dir / "audit-report.html"
+    created = []
+    try:
+        for path, content in ((out, doc), (out.with_suffix(".json"), payload)):
+            with path.open("x", encoding="utf-8") as stream:
+                created.append(path)
+                stream.write(content)
+    except BaseException:
+        # Do not delete a pre-existing file if an exclusive open failed. Cleanup is
+        # confined to files this invocation actually created and its empty run dir.
+        for path in created:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        try:
+            run_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    return out, status
 
-if __name__ == "__main__":
+
+def generate(models, outdir):
+    """Generate an exclusive HTML/JSON pair, preserving the public Path return type."""
+    return _generate(models, outdir)[0]
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", action="version", version=f"model-audit report {VERSION}")
     ap.add_argument("models", nargs="+")
     ap.add_argument("-o", "--outdir", type=Path, default=Path(__file__).parent / "reports")
-    a = ap.parse_args()
-    print(generate([Path(g) for g in a.models], a.outdir))
+    a = ap.parse_args(argv)
+    try:
+        out, status = _generate([Path(g) for g in a.models], a.outdir)
+    except Exception as e:
+        print(f"Report generation failed: {e}", file=sys.stderr)
+        return 2
+    # Only announce a report once both files have been closed successfully.
+    print(out)
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
