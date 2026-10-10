@@ -199,6 +199,50 @@ See `examples/README.md` for a plain-language walkthrough of each.
 - NOTHING here can prove weights are benign in isolation. Hashes prove consistency,
   not safety. The gold standard remains: quantize yourself from a source you trust.
 
+## For quant & fine-tune creators
+
+Most "bad" uploads aren't malicious — they're careless. If you publish quants,
+fine-tunes, or template edits, this checklist keeps your uploads clean and *provable*
+clean, so a hostile repo can't be confused with yours and your users can verify what
+they downloaded is what you made.
+
+**Before you upload:**
+
+1. **Audit your own artifact first.** Run the same commands your users will:
+   `python3 model_audit.py <your-file>`. If it warns on your file, it will warn on
+   theirs — fix it before it ships. Template warnings that mention "file I/O" or
+   "environment access" are often just tool-calling vocabulary, but *you* should be
+   able to explain every warning in your own file.
+2. **Never swap a template after quantizing.** The chat template is baked into the
+   GGUF; editing it afterwards with a hex editor or a "template fixer" leaves exactly
+   the fingerprint our DO-NOT-RUN sample shows
+   ([report-04](examples/report-04-do-not-run-template-swap.html)) — a verdict flip
+   your users will see. If the template needs changing, re-convert from source.
+3. **Keep sidecars in sync.** If you ship `chat_template.jinja`, `tokenizer_config.json`,
+   or `config.json`, make sure every copy agrees. Two templates that disagree is a
+   WARN on its own, and sidecars are audited even when the weights are fine.
+4. **Ship a checksum list.** A `SHA256SUMS` (or `MANIFEST.txt`) next to your files lets
+   any user prove the download matches what you uploaded — and proves a *rename* didn't
+   change contents. Generate it: `sha256sum * > SHA256SUMS`.
+5. **Generate baselines and share them.** `python3 model_audit.py <file> --tensor-hashes`
+   writes a per-tensor fingerprint JSON. Publish it (or a hash of it) alongside the
+   model; keep one yourself. If someone later accuses your upload of tampering, the
+   baseline is your receipt.
+6. **Pin and document your source.** Note the base model repo *and the commit you
+   downloaded* in your model card. A conversion is verifiable later only if the source
+   is pinned — force-pushes erase history.
+7. **Copy templates from sources you've audited.** Pasting a `chat_template.jinja`
+   from a random repo into your build imports whatever is in it — hidden instructions
+   included. Audit it the same way you'd audit a model file.
+
+**Why this matters:** most people spreading a damaged artifact have no idea anything is
+wrong — a mangled template or a silently re-quantized file passes from repo to repo.
+An audit-clean upload with a published baseline doesn't just protect your users; it
+distinguishes you from the repos that can't prove the same. This tool can't prove any
+weights are *good* — that's true for careful creators too — but it makes "what you
+downloaded is exactly what I built, and here's the source" a checkable claim instead
+of a promise.
+
 ## Roadmap
 - **Statistical per-tensor profiling** — compare dequantized block statistics against the
   profile a quant type should produce, as a hint at post-quantization training.
