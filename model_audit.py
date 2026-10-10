@@ -17,12 +17,13 @@ What it checks, per the threat model in the verification guide:
      enable baseline diffing against a known-good quant of the same base.
   5. Sidecars: flags any scripts/executables shipped next to the GGUF.
   6. Optional remote check: --hf <user>/<repo> compares local SHA-256 against
-     the LFS hash HF publishes (detects force-push / file swap since download).
+     the LFS hash HF publishes (reference agreement, not proof of history).
 
 Exit codes: 0 = clean, 1 = findings, 2 = hard errors.
 """
-import argparse, hashlib, json, os, re, struct, sys, unicodedata
+import argparse, hashlib, json, math, os, re, struct, sys, unicodedata
 from pathlib import Path
+from collections import defaultdict, deque
 
 CHUNK = 1 << 24
 try:
@@ -36,6 +37,12 @@ VERSION = "0.4.0"
 class Report:
     def __init__(self):
         self.items = []  # (severity, section, message)
+        self.observations = {k: [] for k in ("structure", "templates", "provenance", "baseline")}
+        self.template_coverage = []
+    def observe(self, domain, status, reason, scope, required=True):
+        self.observations[domain].append(dict(status=status, reason=reason, scope=scope, required=required))
+    def exit_code(self):
+        return 2 if any(s == "CRIT" for s, _, _ in self.items) else (1 if any(s == "WARN" for s, _, _ in self.items) else 0)
     def add(self, sev, section, msg):
         self.items.append((sev, section, msg))
     def print(self, as_json=False):
@@ -45,7 +52,75 @@ class Report:
             return
         order = {"CRIT": 0, "WARN": 1, "INFO": 2, "OK": 3}
         for sev, sec, msg in sorted(self.items, key=lambda x: order.get(x[0], 9)):
-            print(f"[{sev:4}] {sec:12} {msg}")
+            print(terminal_text(f"[{sev:4}] {sec:12} {msg}"))
+
+def terminal_text(text):
+    """Keep stored evidence intact; escape controls only at the terminal boundary."""
+    return "".join(c if c.isprintable() else ascii(c)[1:-1] for c in text)
+
+
+def evidence_rubric(rep):
+    """Summarize explicit observations, never infer coverage from finding prose."""
+    domains, incomplete = {}, []
+    priority = {"FAIL": 0, "NOT CHECKED": 1, "CONCERN": 2, "PASS": 3, "N/A": 4}
+    for domain, observations in rep.observations.items():
+        if not observations:
+            domains[domain] = dict(status="NOT CHECKED", reason="Not requested or not inspected", scope=domain)
+            continue
+        state = min(observations, key=lambda o: priority[o["status"]])["status"]
+        domains[domain] = dict(status=state,
+            reason="; ".join(sorted({o["reason"] for o in observations})),
+            scope="; ".join(sorted({o["scope"] for o in observations})))
+        if any(o["required"] and o["status"] == "NOT CHECKED" for o in observations):
+            incomplete.append(domain)
+    return dict(domains=domains, coverage=dict(status="INCOMPLETE" if incomplete else "COMPLETE",
+        reason=("Required checks incomplete: " + ", ".join(incomplete)) if incomplete else "Requested applicable checks completed; no safety guarantee",
+        scope="Only requested, implemented checks; optional unrequested checks are excluded"))
+
+
+def add_rubric(rep):
+    rubric = evidence_rubric(rep)
+    for domain, row in rubric["domains"].items():
+        rep.add("INFO", "rubric", f"{domain}: {row['status']} — {row['reason']} (scope: {row['scope']})")
+    rep.add("INFO", "rubric", "coverage: " + rubric["coverage"]["status"] + " — " + rubric["coverage"]["reason"])
+
+
+def strict_json(text):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+    def constant(value):
+        raise ValueError(f"non-finite JSON number: {value}")
+    def finite_float(value):
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("non-finite JSON number")
+        return result
+    try:
+        return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=finite_float)
+    except RecursionError as exc:
+        raise ValueError("JSON nesting exceeds the parser limit") from exc
+
+
+def json_object(path):
+    obj = strict_json(Path(path).read_text("utf-8"))
+    if not isinstance(obj, dict):
+        raise ValueError("top level must be a JSON object")
+    return obj
+
+
+def valid_shape(shape):
+    return isinstance(shape, list) and all(type(d) is int and d >= 0 for d in shape)
+
+
+def validate_range(offset, length):
+    if type(offset) is not int or type(length) is not int or offset < 0 or length < 0:
+        raise ValueError("tensor range requires nonnegative integer offset and length")
+
 
 # ---------------- streaming hashes ----------------
 def file_hashes(path):
@@ -62,6 +137,7 @@ def file_hashes(path):
 
 def sha256_at(path, offset, length):
     """Read exactly [offset, offset+length) without loading the whole file."""
+    validate_range(offset, length)
     h = hashlib.sha256()
     with open(path, "rb") as f:
         f.seek(offset)
@@ -69,7 +145,7 @@ def sha256_at(path, offset, length):
         while remaining > 0:
             b = f.read(min(CHUNK, remaining))
             if not b:
-                break
+                raise ValueError("short read while hashing tensor range")
             h.update(b)
             remaining -= len(b)
     return h.hexdigest()
@@ -79,9 +155,15 @@ def sha256_at(path, offset, length):
 # conversion: the bytes change, the values do not, and a byte-only comparison would call
 # an honest conversion "different".
 EXPANDABLE = {"BF16": 2, "F16": 2, "F32": 4}
+# BF16 bit shifts and F32 identity preserve all bits, including NaN payloads.
+# F16 uses struct conversion and is deliberately outside this stronger contract.
+VALUE_NORMALIZATION = "f32-le-bits-v1"
+BIT_PRESERVING = {"BF16", "F32"}
 
 def _to_f32_bytes(chunk, dtype):
     """Widen a chunk of BF16/F16/F32 little-endian bytes to f32, exactly."""
+    if dtype not in EXPANDABLE or len(chunk) % EXPANDABLE[dtype]:
+        raise ValueError("unsupported dtype or misaligned floating-point bytes")
     if dtype == "F32":
         return chunk
     if dtype == "BF16":
@@ -100,6 +182,9 @@ def tensor_fingerprints(path, offset, length, dtype):
     value_sha256 is the hash of the tensor's values widened to f32, or None for dtypes
     that cannot be widened (quantized blocks). For F32 tensors it equals the byte hash.
     """
+    validate_range(offset, length)
+    if dtype in EXPANDABLE and length % EXPANDABLE[dtype]:
+        raise ValueError("misaligned floating-point tensor range")
     h_bytes = hashlib.sha256()
     h_vals = hashlib.sha256() if dtype in EXPANDABLE else None
     step = EXPANDABLE.get(dtype, 1)
@@ -109,7 +194,7 @@ def tensor_fingerprints(path, offset, length, dtype):
         while remaining > 0:
             b = f.read(min(CHUNK, remaining))
             if not b:
-                break
+                raise ValueError("short read while fingerprinting tensor range")
             remaining -= len(b)
             h_bytes.update(b)
             if h_vals is not None:
@@ -118,7 +203,7 @@ def tensor_fingerprints(path, offset, length, dtype):
                 h_vals.update(_to_f32_bytes(b[:cut], dtype))
                 leftover = b[cut:]
         if h_vals is not None and leftover:
-            h_vals.update(leftover)
+            raise ValueError("incomplete floating-point element")
     return h_bytes.hexdigest(), (h_vals.hexdigest() if h_vals else None)
 
 # ---------------- template tamper scan ----------------
@@ -144,6 +229,9 @@ def scan_template(tpl, rep):
     if tpl is None:
         rep.add("CRIT", "template", "No tokenizer.chat_template in file — loaders fall back to"
                                       " card config or defaults; behavior not pinned by this artifact.")
+        return
+    if not isinstance(tpl, str):
+        rep.add("WARN", "template", "template invalid: expected text")
         return
     zwc = [c for c in tpl if c in ZERO_WIDTH]
     if zwc:
@@ -186,9 +274,7 @@ def scan_template(tpl, rep):
             "system_message", "system_prompt", "tools", "documents", "prompt",
             "strip", "tojson", "messages_json"}:
             rep.add("INFO", "template", f"references non-standard variable: {var}")
-    print("\n--- chat template (verbatim from file) ---")
-    print(tpl)
-    print("--- end template ---\n")
+
 
 # ---------------- architecture sanity ----------------
 EXPECTED_PREFIX = {"llama": "blk", "qwen2": "blk", "gemma": None}  # loose; count-checked below
@@ -333,13 +419,15 @@ def read_st_header(path, rep):
             rep.add("CRIT", "st-header", f"header unreadable: declared length {hlen:,} bytes is implausible "
                                          f"(> 256 MiB) — fabricated or corrupt")
             return None
-        if hlen >= size - 8:
+        if hlen > size - 8:
             rep.add("CRIT", "st-header", f"header unreadable: declared length {hlen:,} exceeds the file size "
                                          f"{size:,} — truncated or fabricated file")
             return None
         blob = f.read(hlen)
     try:
-        hdr = json.loads(blob.decode("utf-8"))
+        if len(blob) != hlen:
+            raise ValueError("short header read")
+        hdr = strict_json(blob.decode("utf-8"))
     except Exception as e:
         rep.add("CRIT", "st-header", f"header invalid: not valid JSON ({e})")
         return None
@@ -355,9 +443,15 @@ def read_st_header(path, rep):
 
 def st_tensors(hdr, data_start, size, rep):
     """Validate every declared tensor and return shims the shared checks can use."""
+    rep.structure_valid = True
+    rep.structure_complete = True
+    rep.structure_concern = False
+    rep.baseline_eligible = True
     meta = hdr.get("__metadata__")
-    if meta is not None and not isinstance(meta, dict):
-        rep.add("CRIT", "st-header", "__metadata__ present but not a JSON object")
+    if "__metadata__" in hdr and (not isinstance(meta, dict) or not all(isinstance(v, str) for v in meta.values())):
+        rep.structure_valid = False
+        rep.baseline_eligible = False
+        rep.add("CRIT", "st-header", "__metadata__ must be a string-to-string JSON object")
     elif isinstance(meta, dict):
         for k, v in sorted(meta.items()):
             if isinstance(v, str) and len(v) <= 200:
@@ -366,22 +460,35 @@ def st_tensors(hdr, data_start, size, rep):
                 rep.add("INFO", "provenance", f"__metadata__[{k}] present (non-string or oversized)")
     entries = {k: v for k, v in hdr.items() if k != "__metadata__"}
     if not entries:
-        rep.add("CRIT", "st-header", "no tensors declared in header")
+        rep.add("INFO", "st-header", "no tensors declared in header (empty artifact)")
     tensors, spans = [], []
     for name, ent in entries.items():
         if not isinstance(ent, dict) or not {"dtype", "shape", "data_offsets"} <= set(ent):
+            rep.structure_valid = False
+            rep.baseline_eligible = False
             rep.add("CRIT", "st-header", f"tensor entry missing dtype/shape/data_offsets: {name}")
             continue
         dtype, shape, off = ent["dtype"], ent["shape"], ent["data_offsets"]
-        if not (isinstance(off, list) and len(off) == 2 and all(isinstance(x, int) for x in off)):
+        if not isinstance(dtype, str) or not valid_shape(shape):
+            rep.structure_valid = False
+            rep.baseline_eligible = False
+            rep.add("CRIT", "st-header", f"tensor entry invalid dtype or shape: {name}")
+            continue
+        if not (isinstance(off, list) and len(off) == 2 and all(type(x) is int for x in off)):
+            rep.structure_valid = False
+            rep.baseline_eligible = False
             rep.add("CRIT", "st-header", f"tensor entry has malformed data_offsets: {name} ({off!r})")
             continue
         begin, end = off
         if begin < 0 or end < begin:
+            rep.structure_valid = False
+            rep.baseline_eligible = False
             rep.add("CRIT", "st-header", f"tensor entry has nonsensical offsets: {name} [{begin}, {end})")
             continue
         n_bytes = end - begin
         if data_start + end > size:
+            rep.structure_valid = False
+            rep.baseline_eligible = False
             rep.add("CRIT", "st-tensors", f"tensor size: {name} declares data ending at "
                                           f"{data_start + end:,}, past the end of the file ({size:,}) — truncated")
             continue
@@ -390,68 +497,80 @@ def st_tensors(hdr, data_start, size, rep):
         for d in shape:
             numel *= d
         if unit is None:
+            rep.structure_complete = False
+            rep.baseline_eligible = False
             rep.add("WARN", "st-tensors", f"tensor size: {name} dtype {dtype!r} is not a known type — "
                                           f"its byte size cannot be verified")
         elif int(numel * unit) != n_bytes:
+            rep.structure_valid = False
+            rep.baseline_eligible = False
             rep.add("CRIT", "st-tensors", f"tensor size: {name} is {dtype} {list(shape)}, which implies "
                                           f"{int(numel * unit):,} bytes, but the header declares {n_bytes:,} — "
                                           f"the header contradicts itself")
         if n_bytes == 0 or any(d == 0 for d in shape):
-            rep.add("WARN", "st-tensors", f"tensor size: {name} is empty ({dtype} {list(shape)})")
+            rep.add("WARN", "st-tensors", f"empty tensor: {name} is empty ({dtype} {list(shape)}) — "
+                                         "legal in safetensors; inventory heuristic only, review whether intended")
         tensors.append(STTensor(name, shape, dtype, data_start + begin, n_bytes))
         spans.append((begin, end, name))
     spans.sort()
     prev_end = 0
     for begin, end, name in spans:
         if begin < prev_end:
+            rep.structure_valid = False
+            rep.baseline_eligible = False
             rep.add("CRIT", "st-tensors", f"tensor layout: {name} starts inside another tensor's data — "
                                           f"the declared layout is not valid safetensors")
         elif begin > prev_end:
+            rep.structure_concern = True
+            rep.baseline_eligible = False
             rep.add("WARN", "st-tensors", f"undeclared gap: {begin - prev_end:,} bytes between tensors before "
                                           f"{name} that no header entry accounts for")
         prev_end = max(prev_end, end)
     if prev_end < size - data_start:
+        rep.structure_concern = True
+        rep.baseline_eligible = False
         rep.add("WARN", "st-tensors", f"trailing data: {size - data_start - prev_end:,} bytes after the last "
                                       f"declared tensor that the header does not account for")
     return tensors
 
+
 def check_st_config(path, rep):
-    """config.json is where a safetensors file's claimed identity and provenance live."""
-    fp = path.parent / "config.json"
-    if not fp.exists():
-        rep.add("INFO", "meta", "no config.json in this directory — architecture and provenance are not "
-                                "pinned by any sidecar here")
-        return
-    try:
-        cfg = json.loads(fp.read_text("utf-8"))
-    except Exception as e:
-        rep.add("WARN", "sidecar", f"config.json present but unreadable: {e}")
-        return
-    archs = cfg.get("architectures") or []
-    name = cfg.get("_name_or_path") or cfg.get("name_or_path")
-    name_txt = repr(name) if name else "(not stated in config.json)"
-    rep.add("INFO", "meta", f"architecture={archs[0] if archs else cfg.get('model_type', '?')} "
-                            f"name={name_txt} file_type={cfg.get('torch_dtype', '?')} (safetensors)")
-    for key in ("model_type", "torch_dtype", "transformers_version", "base_model",
-                "quantized_by", "converted_by", "source"):
-        if cfg.get(key):
-            rep.add("INFO", "meta", f"{key} = {cfg[key]}")
-    if cfg.get("quantization_config"):
-        qc = cfg["quantization_config"]
-        method = qc.get("quant_method", "?") if isinstance(qc, dict) else "?"
-        rep.add("INFO", "provenance", f"config.json carries quantization_config ({method}) — these weights are "
-                                      f"not raw fp/bf16, and their provenance is the uploader's word")
-    for fp2, label in ((fp, "config.json"), (path.parent / "tokenizer_config.json", "tokenizer_config.json")):
-        if not fp2.exists():
+    """Inspect config and tokenizer config independently, including remote-code hints."""
+    for name in ("config.json", "tokenizer_config.json"):
+        fp = path.parent / name
+        if not fp.exists():
+            if name == "config.json":
+                rep.add("INFO", "meta", "no config.json in this directory — provenance is not pinned here")
             continue
         try:
-            other = cfg if fp2 == fp else json.loads(fp2.read_text("utf-8"))
-        except Exception:
+            cfg = json_object(fp)
+            archs = cfg.get("architectures", [])
+            if not isinstance(archs, list) or not all(isinstance(x, str) for x in archs):
+                raise ValueError("architectures must be a list of strings")
+            if "auto_map" in cfg and (not isinstance(cfg["auto_map"], dict) or not all(
+                    isinstance(v, str) or (isinstance(v, list) and all(x is None or isinstance(x, str) for x in v)) for v in cfg["auto_map"].values())):
+                raise ValueError("auto_map must map names to text or lists of text/null")
+            if "quantization_config" in cfg and not isinstance(cfg["quantization_config"], dict):
+                raise ValueError("quantization_config must be an object")
+            for key in ("model_type", "torch_dtype", "transformers_version", "_name_or_path", "name_or_path"):
+                if key in cfg and cfg[key] is not None and not isinstance(cfg[key], str):
+                    raise ValueError(f"{key} must be text")
+        except (OSError, ValueError, UnicodeError) as e:
+            rep.add("WARN", "sidecar", f"{name} present but unreadable: {e}")
+            rep.observe("provenance", "NOT CHECKED", "Present configuration could not be validated", name + " self-reported configuration")
             continue
-        if other.get("auto_map"):
-            rep.add("WARN", "sidecar", f"auto_map declared in {label}: loading this model with "
-                                       f"trust_remote_code runs Python the uploader ships — a separate supply "
-                                       f"chain from the weights, and the usual way a 'model' executes code")
+        if name == "config.json":
+            model_name = cfg.get("_name_or_path") or cfg.get("name_or_path")
+            rep.add("INFO", "meta", f"architecture={archs[0] if archs else cfg.get('model_type', '?')} "
+                                    f"name={model_name!r} file_type={cfg.get('torch_dtype', '?')} (safetensors)")
+            for key in ("model_type", "torch_dtype", "transformers_version", "base_model", "quantized_by", "converted_by", "source"):
+                if cfg.get(key):
+                    rep.add("INFO", "meta", f"{key} = {cfg[key]}")
+            if cfg.get("quantization_config"):
+                rep.add("INFO", "provenance", "config.json carries quantization_config — provenance is self-reported")
+        if cfg.get("auto_map"):
+            rep.add("WARN", "sidecar", f"auto_map declared in {name}: trust_remote_code may execute uploader Python")
+
 
 def _scan_template_labeled(text, rep, label):
     before = len(rep.items)
@@ -460,46 +579,85 @@ def _scan_template_labeled(text, rep, label):
         sev, sec, msg = rep.items[i]
         rep.items[i] = (sev, sec, f"{label}: {msg}")
 
+
+def record_template(text, rep, label, logical_name):
+    before = len(rep.items)
+    _scan_template_labeled(text, rep, label)
+    suspicious = any(s in ("WARN", "CRIT") for s, _, _ in rep.items[before:])
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    rep.template_coverage.append(dict(label=label, logical_name=logical_name, sha256=digest, state="inspected"))
+    rep.observe("templates", "CONCERN" if suspicious else "PASS",
+                "Signature findings require review" if suspicious else "All inspected text passed implemented signatures",
+                label + " (signature scan only)")
+    rep.add("INFO", "template", f"template sidecar: {label} ({len(text.encode('utf-8')):,} bytes)")
+
+
+def template_incomplete(rep, label, reason):
+    rep.template_coverage.append(dict(label=label, logical_name=None, sha256=None, state="incomplete"))
+    rep.observe("templates", "NOT CHECKED", reason, label)
+    rep.add("WARN", "template", f"template invalid: {label}: {reason}")
+
+
 def scan_st_templates(path, rep):
-    """The template is not in the artifact — it is a sidecar. Scan every one we find."""
+    """Scan every supported source, preserving incomplete coverage and logical names."""
     d = path.parent
-    jinjas = [p for p in sorted(d.glob("*.jinja")) + sorted(d.glob("*.jinja2")) if p.is_file()]
-    cfg_templates = []
+    jinjas = sorted(set(d.glob("*.jinja")) | set(d.glob("*.jinja2")) | set((d / "additional_chat_templates").glob("*.jinja")))
     for fp in jinjas:
-        rep.add("INFO", "template", f"template sidecar: {fp.name} ({fp.stat().st_size:,} bytes)")
+        label = str(fp.relative_to(d))
+        logical = fp.stem if fp.parent.name == "additional_chat_templates" else ("default" if fp.stem == "chat_template" else fp.stem)
         try:
-            _scan_template_labeled(fp.read_text("utf-8", errors="replace"), rep, fp.name)
-        except Exception as e:
-            rep.add("WARN", "template", f"template sidecar: {fp.name} unreadable: {e}")
-    tcfg = d / "tokenizer_config.json"
-    if tcfg.exists():
+            record_template(fp.read_text("utf-8"), rep, label, logical)
+        except (OSError, UnicodeError) as e:
+            template_incomplete(rep, label, str(e))
+    for filename in ("tokenizer_config.json", "chat_template.json"):
+        fp = d / filename
+        if not fp.exists():
+            continue
         try:
-            tcfg_json = json.loads(tcfg.read_text("utf-8"))
-        except Exception as e:
-            tcfg_json = {}
-            rep.add("WARN", "sidecar", f"tokenizer_config.json present but unreadable: {e}")
-        tpl = tcfg_json.get("chat_template")
+            obj = json_object(fp)
+        except (OSError, ValueError, UnicodeError) as e:
+            template_incomplete(rep, filename, str(e))
+            continue
+        if "chat_template" not in obj:
+            continue
+        tpl = obj["chat_template"]
+        if filename == "chat_template.json" and not isinstance(tpl, str):
+            template_incomplete(rep, filename, "legacy chat_template.json requires a chat_template string")
+            continue
+        entries = []
         if isinstance(tpl, str):
-            cfg_templates.append(("tokenizer_config.json", tpl))
-        elif isinstance(tpl, list):
-            cfg_templates += [(f"tokenizer_config.json[chat_template[{i}]]", t)
-                              for i, t in enumerate(tpl) if isinstance(t, str)]
+            entries = [("default", tpl, filename)]
         elif isinstance(tpl, dict):
-            cfg_templates += [(f"tokenizer_config.json[chat_template.{k}]", v)
-                              for k, v in tpl.items() if isinstance(v, str)]
-    for label, text in cfg_templates:
-        rep.add("INFO", "template", f"template sidecar: {label} ({len(text):,} bytes)")
-        _scan_template_labeled(text, rep, label)
-    if jinjas and cfg_templates:
-        jtxt = jinjas[0].read_text("utf-8", errors="replace")
-        if any(text != jtxt for _, text in cfg_templates):
-            rep.add("WARN", "template", "both a chat_template.jinja sidecar and a chat_template in "
-                                        "tokenizer_config.json exist and they differ — which one a loader uses "
-                                        "is runtime-dependent, so the model's behavior is not pinned by either")
-    if not jinjas and not cfg_templates:
-        rep.add("INFO", "template", "no chat template sidecar in this directory (chat_template.jinja or "
-                                    "tokenizer_config.json) — this format never carries the template inside the "
-                                    "file, so whatever loads the model supplies it")
+            entries = [(key, val, f"{filename}[chat_template.{key}]") for key, val in tpl.items()]
+        elif isinstance(tpl, list):
+            for i, entry in enumerate(tpl):
+                label = f"{filename}[chat_template[{i}]]"
+                if isinstance(entry, str):
+                    entries.append(("default" if i == 0 else f"legacy_{i}", entry, label))
+                elif isinstance(entry, dict) and isinstance(entry.get("name"), str) and isinstance(entry.get("template"), str):
+                    entries.append((entry["name"], entry["template"], label))
+                else:
+                    template_incomplete(rep, label, "expected text or a named {name, template} record")
+        else:
+            template_incomplete(rep, filename, "chat_template must be text, a map, or a list")
+        if isinstance(tpl, (dict, list)) and not tpl:
+            template_incomplete(rep, filename, "empty template collection")
+        for logical, text, label in entries:
+            if not isinstance(text, str) or not logical:
+                template_incomplete(rep, label, "template name and text must be strings")
+            else:
+                record_template(text, rep, label, logical)
+    by_name = {}
+    for source in rep.template_coverage:
+        if source["state"] == "inspected":
+            by_name.setdefault(source["logical_name"], set()).add(source["sha256"])
+    for logical, hashes in sorted(by_name.items()):
+        if len(hashes) > 1:
+            rep.add("WARN", "template", f"template sources for {logical!r}: they differ — loader selection is runtime-dependent")
+            rep.observe("templates", "CONCERN", "Sources for the same logical template differ", logical)
+    if not rep.template_coverage:
+        rep.add("INFO", "template", "no chat template sidecar in this directory — the loader supplies it")
+        rep.observe("templates", "NOT CHECKED", "No template source was available", "supported safetensors sidecars")
 
 def check_st_index(path, tensors, rep):
     """Multi-shard models are described by model.safetensors.index.json — check it agrees."""
@@ -508,9 +666,16 @@ def check_st_index(path, tensors, rep):
         return
     fp = idxs[0]
     try:
-        idx = json.loads(fp.read_text("utf-8"))
+        idx = json_object(fp)
+        wmap = idx.get("weight_map")
+        meta = idx.get("metadata", {})
+        if not isinstance(wmap, dict) or not all(isinstance(v, str) for v in wmap.values()):
+            raise ValueError("weight_map must map tensor names to shard strings")
+        if not isinstance(meta, dict) or ("total_size" in meta and (type(meta["total_size"]) is not int or meta["total_size"] < 0)):
+            raise ValueError("metadata.total_size must be a nonnegative integer")
     except Exception as e:
         rep.add("WARN", "sidecar", f"index mismatch: {fp.name} unreadable ({e})")
+        rep.observe("structure", "NOT CHECKED", "Present shard index could not be validated", fp.name)
         return
     wmap = idx.get("weight_map") or {}
     shards = sorted(set(wmap.values()))
@@ -520,15 +685,18 @@ def check_st_index(path, tensors, rep):
     missing = sorted(listed_here - mine)
     unlisted = sorted(mine - listed_here)
     if missing:
+        rep.observe("structure", "FAIL", "Index references tensors absent from this shard", fp.name)
         rep.add("CRIT", "index", f"index mismatch: {len(missing)} tensor(s) the index routes to this shard are "
                                  f"absent from it (e.g. {', '.join(missing[:3])})")
     if unlisted:
+        rep.observe("structure", "CONCERN", "Shard tensors are not listed in selected index", fp.name)
         rep.add("WARN", "index", f"index mismatch: {len(unlisted)} tensor(s) present here are not listed in "
                                  f"{fp.name} (e.g. {', '.join(unlisted[:3])}) — added or renamed after indexing")
     total = (idx.get("metadata") or {}).get("total_size")
     if len(shards) == 1 and isinstance(total, int):
         declared = sum(t.n_bytes for t in tensors)
         if total != declared:
+            rep.observe("structure", "FAIL", "Selected single-shard index total_size disagrees", fp.name)
             rep.add("CRIT", "index", f"index mismatch: metadata.total_size is {total:,} bytes but this file "
                                      f"declares {declared:,} — the index describes a different file")
 
@@ -550,105 +718,138 @@ def check_manifest(path, sha, rep):
                    if p.is_file()), None)
     if fp is None:
         return
+    scope = f"Uploader-supplied checksum {fp.name}; consistency only, not independent trust"
     entries = {}
-    for line in fp.read_text("utf-8", errors="replace").splitlines():
+    try:
+        lines = fp.read_text("utf-8").splitlines()
+    except (OSError, UnicodeError) as e:
+        rep.add("WARN", "manifest", f"manifest unreadable: {e}")
+        rep.observe("provenance", "NOT CHECKED", "Checksum list could not be read", scope)
+        return
+    unsupported = False
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
         parts = line.split()
-        if len(parts) < 2:
+        if len(parts) != 2:
+            unsupported = True
             continue
         a, b = parts[0], parts[-1].lstrip("*")
         if re.fullmatch(r"[0-9a-fA-F]{64}", a):
-            entries[b] = a.lower()
+            entries.setdefault(b, []).append(a.lower())
         elif re.fullmatch(r"[0-9a-fA-F]{64}", b):
-            entries[a] = b.lower()
+            entries.setdefault(a, []).append(b.lower())
+        else:
+            unsupported = True
+    if unsupported:
+        rep.add("WARN", "manifest", f"ambiguous manifest: {fp.name} contains unsupported records")
+        rep.observe("provenance", "CONCERN", "Unsupported records prevent an unambiguous selected checksum", scope)
+        return
     if not entries:
-        rep.add("INFO", "manifest", f"{fp.name} present but no readable SHA-256 lines")
+        rep.add("WARN", "manifest", f"{fp.name} present but no readable SHA-256 lines")
+        rep.observe("provenance", "NOT CHECKED", "No usable checksums", scope)
         return
     if path.name in entries:
-        if entries[path.name] == sha:
+        hashes = entries[path.name]
+        if len(hashes) != 1:
+            rep.add("WARN", "manifest", f"ambiguous manifest: duplicate entries for {path.name}")
+            rep.observe("provenance", "CONCERN", "Duplicate selected filename entries", scope)
+        elif hashes[0] == sha:
             rep.add("OK", "manifest", f"SHA-256 matches the uploader's own entry for {path.name} in {fp.name}")
+            rep.observe("provenance", "PASS", "Selected unique filename checksum matches", scope)
         else:
-            rep.add("CRIT", "manifest", f"MANIFEST MISMATCH: this file is {sha[:16]}… but {fp.name} lists "
-                                        f"{entries[path.name][:16]}… for {path.name} — the file differs from "
-                                        f"what the uploader published hashes for")
+            rep.add("CRIT", "manifest", f"MANIFEST MISMATCH: {path.name} differs from its selected checksum")
+            rep.observe("provenance", "FAIL", "Selected unique filename checksum differs", scope)
         return
-    for name, h in entries.items():
-        if h == sha:
-            rep.add("INFO", "manifest", f"renamed since the manifest was written: this file's SHA-256 appears "
-                                        f"in {fp.name} as {name} — content unchanged, name is not")
-            return
+    names = [name for name, hashes in entries.items() if sha in hashes]
+    if names:
+        rep.add("INFO", "manifest", f"renamed since the manifest was written: matching content is listed as {', '.join(sorted(names))}; naming history is not independently verified")
+        rep.observe("provenance", "CONCERN", "Content matches another name, not the selected filename", scope)
+        return
     rep.add("INFO", "manifest", f"{fp.name} present ({len(entries)} entries) but this file is not listed in it")
+    rep.observe("provenance", "NOT CHECKED", "Checksum list does not cover this filename", scope, required=False)
 
 # ---------------- HF remote check ----------------
 def hf_check(repo, local_sha, path, rep, revision=None):
+    scope = f"HF {repo}; repository consistency only, not uploader trust"
     try:
         from huggingface_hub import HfApi
-    except ImportError:
-        rep.add("WARN", "remote", "huggingface_hub not installed; cannot do remote hash check")
-        return
-    try:
-        api = HfApi()
-        if revision:
-            rep.add("INFO", "remote", f"pinned revision: {revision}")
-        info = api.model_info(repo, files_metadata=True, revision=revision)
-        match = None
-        for s in info.siblings:
-            # any LFS-tracked file, not just .gguf: the artifact's identity is its hash
-            if s.lfs and s.lfs.sha256 == local_sha:
-                match = s
-                break
-        if match is None:
-            # try exact filename match for a clearer diagnostic
-            byname = [s for s in info.siblings
-                      if s.lfs and Path(s.rfilename).name == path.name]
-            if byname:
-                s = byname[0]
-                rep.add("CRIT", "remote",
-                        f"SHA-256 MISMATCH vs {repo}@{str(info.sha)[:12]}: local {local_sha[:16]}… "
-                        f"vs repo {s.lfs.sha256[:16]}… for {s.rfilename} — file was swapped, "
-                        f"re-quantized upstream, or this copy did not come from this repo")
-            else:
-                rep.add("WARN", "remote", f"no file with this SHA-256 or filename in {repo} — "
-                                          f"repo contents may have been replaced (force-push)")
-            return
-        rep.add("OK", "remote", f"local SHA-256 matches HF LFS for {repo}@{str(info.sha)[:12]} ({match.rfilename})")
-        # warn if the repo ships its own chat template sidecar
-        names = {s.rfilename for s in info.siblings}
-        if "chat_template.jinja" in names:
-            rep.add("INFO", "remote", f"{repo} ships chat_template.jinja alongside the weights — "
-                                              f"loaders may prefer it over any template inside the artifact")
+        info = HfApi().model_info(repo, files_metadata=True, revision=revision)
+        scope += " at resolved commit " + str(info.sha)
+        rep.add("INFO", "remote", f"resolved revision: {info.sha} (requested {revision or 'default branch'})")
+        matches = [s for s in info.siblings if s.lfs and s.lfs.sha256 == local_sha]
+        byname = [s for s in info.siblings if s.lfs and Path(s.rfilename).name == path.name]
+        if len(matches) == 1:
+            rep.add("OK", "remote", f"local SHA-256 matches HF LFS for {repo}@{info.sha} ({matches[0].rfilename})")
+            rep.observe("provenance", "PASS", "One repository LFS entry matches the selected file hash", scope)
+        elif len(matches) > 1 or len(byname) > 1:
+            rep.add("WARN", "remote", "ambiguous remote reference: multiple matching hashes or basenames")
+            rep.observe("provenance", "CONCERN", "Remote reference is ambiguous", scope)
+        elif len(byname) == 1:
+            rep.add("CRIT", "remote", f"SHA-256 MISMATCH vs {repo}@{info.sha}: {byname[0].rfilename}")
+            rep.observe("provenance", "FAIL", "Unique basename reference has a different hash", scope)
+        else:
+            rep.add("WARN", "remote", f"no file with this SHA-256 or filename in {repo}")
+            rep.observe("provenance", "NOT CHECKED", "No applicable LFS reference found", scope)
     except Exception as e:
         rep.add("WARN", "remote", f"HF fetch failed: {e}")
+        rep.observe("provenance", "NOT CHECKED", "Remote lookup failed", scope)
 
 # ---------------- baseline tensor hash dump / compare ----------------
-def dump_tensor_hashes(tensors, path):
+def dump_tensor_hashes(tensors, path, byte_order="little"):
     """Per-tensor byte hashes, plus value hashes where widening to f32 is exact."""
     out, vals = {}, {}
     for t in tensors:
         dtype = getattr(t, "dtype", None) or t.tensor_type.name
-        hb, hv = tensor_fingerprints(path, t.data_offset, t.n_bytes, dtype)
+        # Raw on-disk GGUF bytes may be big-endian. Do not interpret those as LE.
+        hb, hv = tensor_fingerprints(path, t.data_offset, t.n_bytes,
+                                     dtype if byte_order == "little" else None)
         out[t.name] = hb
-        if hv and hv != hb:  # F32 needs no separate value hash; it is the byte hash
+        if hv:
             vals[t.name] = hv
     return out, vals
 
-def write_baseline(tensors, path, sha, fmt, rep):
-    hashes, values = dump_tensor_hashes(tensors, path)
+def write_baseline(tensors, path, sha, fmt, rep, baseline_out=None, byte_order=None):
+    # safetensors is little-endian by definition; GGUF must supply reader evidence.
+    byte_order = "little" if fmt == "safetensors" else byte_order
+    hashes, values = dump_tensor_hashes(tensors, path, byte_order)
     shapes = {t.name: [int(d) for d in t.shape] for t in tensors}
-    outp = path.with_suffix(path.suffix + ".tensorhashes.json")
-    outp.write_text(json.dumps({"file_sha256": sha, "format": fmt,
-                                "shapes": shapes, "tensors": hashes, "values": values}, indent=1))
+    value_metadata = {t.name: dict(dtype=getattr(t, "dtype", None) or t.tensor_type.name,
+                                  byte_order=byte_order, normalization=VALUE_NORMALIZATION)
+                      for t in tensors if t.name in values
+                      and (getattr(t, "dtype", None) or t.tensor_type.name) in BIT_PRESERVING}
+    outp = Path(baseline_out) if baseline_out is not None else path.with_suffix(path.suffix + ".tensorhashes.json")
+    # Only an exclusive-open conflict is a recoverable output warning. Other I/O
+    # errors still propagate, and previously collected critical findings survive.
+    try:
+        stream = outp.open("x", encoding="utf-8")
+    except FileExistsError:
+        rep.add("WARN", "baseline", f"baseline exists: {outp} — pass --baseline-out to write a new snapshot; existing file unchanged")
+        return
+    try:
+        with stream:
+            json.dump({"file_sha256": sha, "format": fmt, "shapes": shapes,
+                       "tensors": hashes, "values": values,
+                       "value_metadata": value_metadata}, stream, indent=1)
+    except Exception:
+        outp.unlink()
+        raise
     rep.add("OK", "baseline", f"per-tensor SHA-256 written to {outp}")
 
 # ---------------- main ----------------
-def _audit_gguf(path, rep, sha, size, do_hashes, hf_repo, hf_revision):
+def _audit_gguf(path, rep, sha, size, do_hashes, hf_repo, hf_revision, baseline_out=None):
     rep.add("INFO", "file", "format=gguf")
     if gguf is None:
+        rep.observe("structure", "NOT CHECKED", "GGUF dependency unavailable", "GGUF artifact")
+        rep.observe("templates", "NOT CHECKED", "GGUF could not be inspected", "GGUF embedded template only")
         rep.add("CRIT", "file", "the gguf python package is not installed (pip install gguf) — "
                                 "GGUF files cannot be parsed without it")
         return
     try:
         rdr = gguf.GGUFReader(str(path))
     except Exception as e:
+        rep.observe("structure", "NOT CHECKED", "GGUF parser failed", "GGUF artifact")
+        rep.observe("templates", "NOT CHECKED", "GGUF could not be inspected", "GGUF embedded template only")
         rep.add("CRIT", "file", f"GGUF header unreadable: {e}")
         return
     md = {}
@@ -668,40 +869,62 @@ def _audit_gguf(path, rep, sha, size, do_hashes, hf_repo, hf_revision):
                 md[k] = field.parts[field.data[-1]].tolist()
         except Exception as e:
             md[k] = f"<unreadable: {e}>"
+    start = len(rep.items)
     arch = check_meta(md, path, rep)
     tpl = md.get("tokenizer.chat_template")
     if tpl is None and arch == "clip":
         rep.add("INFO", "template", "No tokenizer.chat_template — normal for vision projector (mmproj) files")
+        rep.observe("templates", "N/A", "Vision projector has no chat template by design", "GGUF embedded template only")
+    elif isinstance(tpl, str):
+        record_template(tpl, rep, "GGUF embedded tokenizer.chat_template", "default")
     else:
         scan_template(tpl, rep)
+        rep.observe("templates", "NOT CHECKED", "Embedded chat template missing or invalid", "GGUF embedded template only")
     tensors = list(rdr.tensors)
     check_tensors(tensors, arch, rep)
+    invalid = any(sev == "CRIT" and sec != "template" for sev, sec, _ in rep.items[start:])
+    rep.observe("structure", "FAIL" if invalid else "PASS", "GGUF reader and implemented tensor checks only", "GGUF structural checks, not all format invariants")
     check_sidecars(path, rep)
     check_manifest(path, sha, rep)
-    if do_hashes:
-        write_baseline(tensors, path, sha, "gguf", rep)
+    if do_hashes and not invalid:
+        byte_order = "little" if rdr.endianess == gguf.GGUFEndian.LITTLE else "big"
+        write_baseline(tensors, path, sha, "gguf", rep, baseline_out, byte_order)
     if hf_repo:
         hf_check(hf_repo, sha, path, rep, revision=hf_revision)
 
-def _audit_st(path, rep, sha, size, do_hashes, hf_repo, hf_revision):
+def _audit_st(path, rep, sha, size, do_hashes, hf_repo, hf_revision, baseline_out=None):
     rep.add("INFO", "file", "format=safetensors")
     parsed = read_st_header(path, rep)
     if parsed is None:
+        rep.observe("structure", "FAIL", "Invalid or truncated header", "safetensors header")
+        rep.observe("templates", "NOT CHECKED", "Artifact parsing failed before template inspection", "supported safetensors sidecars")
         return
     hdr, data_start, fsize = parsed
+    start = len(rep.items)
     tensors = st_tensors(hdr, data_start, fsize, rep)
+    invalid = not rep.structure_valid
+    incomplete = not rep.structure_complete
+    warned = rep.structure_concern
+    state = "FAIL" if invalid else ("NOT CHECKED" if incomplete else ("CONCERN" if warned else "PASS"))
+    rep.observe("structure", state, "Implemented header and tensor-layout checks" + (" incomplete for unsupported dtype" if incomplete else " completed"), "safetensors file only")
+    if invalid and incomplete:
+        rep.observe("structure", "NOT CHECKED", "Unsupported dtype prevents complete size validation", "safetensors tensor sizes")
     check_tensors(tensors, "?", rep, naming="hf")
     check_st_config(path, rep)
     scan_st_templates(path, rep)
     check_st_index(path, tensors, rep)
     check_sidecars(path, rep)
     check_manifest(path, sha, rep)
-    if do_hashes:
-        write_baseline(tensors, path, sha, "safetensors", rep)
+    structure_complete = rep.baseline_eligible and all(
+        o["status"] in ("PASS", "N/A") for o in rep.observations["structure"])
+    if do_hashes and structure_complete:
+        write_baseline(tensors, path, sha, "safetensors", rep, baseline_out)
+    elif do_hashes:
+        rep.add("CRIT", "baseline", "baseline refused: tensor structure was not fully validated")
     if hf_repo:
         hf_check(hf_repo, sha, path, rep, revision=hf_revision)
 
-def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None):
+def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None, baseline_out=None):
     rep.add("INFO", "file", f"{path}")
     sha, size = file_hashes(path)
     rep.add("INFO", "file", f"sha256={sha}")
@@ -709,180 +932,193 @@ def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None):
     with open(path, "rb") as f:
         magic = f.read(4)
     if magic == b"GGUF":
-        return _audit_gguf(path, rep, sha, size, do_hashes, hf_repo, hf_revision)
+        return _audit_gguf(path, rep, sha, size, do_hashes, hf_repo, hf_revision, baseline_out)
     if looks_like_safetensors(path):
-        return _audit_st(path, rep, sha, size, do_hashes, hf_repo, hf_revision)
+        return _audit_st(path, rep, sha, size, do_hashes, hf_repo, hf_revision, baseline_out)
+    rep.observe("structure", "FAIL", "Unrecognized artifact format", "file format")
+    rep.observe("templates", "NOT CHECKED", "Artifact format not recognized", "template scan")
     rep.add("CRIT", "file", f"bad magic {magic!r} — not a GGUF or safetensors file")
 
-def blob_identity(A, B):
-    """Match weight blobs across formats by content, as a multiset.
+def normalized_fingerprint(base, name):
+    """Return only a self-described F32 digest; never interpret an untyped byte hash."""
+    meta = base.get("value_metadata", {}).get(name, {})
+    if (meta.get("dtype") in BIT_PRESERVING and meta.get("byte_order") == "little"
+            and meta.get("normalization") == VALUE_NORMALIZATION):
+        return base.get("values", {}).get(name)
+    return None
 
-    Names differ between formats (model.layers.0.self_attn.q_proj vs blk.0.attn_q), and so
-    can storage types: ggml writes 2-D dims in the opposite order, and converters upcast
-    bf16 norms to f32. So we match in two passes — byte-identical first, then by value
-    (a tensor whose values widened to f32 hash equal to one of A's).
 
-    Returns (exact, value_equal, total_in_b, shape_agree_exact, numel_agree_value, unmatched).
+def match_blobs(A, B):
+    """Consume once: byte matches, typed F32 matches, then ambiguous candidates.
+
+    The four-value return stays compatible; callers can identify typed pairs with
+    normalized_fingerprint(). Metadata describes a hash, not its producer's trust.
     """
-    exact = {}
-    for h in A["tensors"].values():
-        exact[h] = exact.get(h, 0) + 1
-    # A's value hashes, plus its byte hashes (an f32 tensor's value hash IS its byte hash)
-    pool = dict(exact)
-    for h in (A.get("values") or {}).values():
-        pool[h] = pool.get(h, 0) + 1
-    shapes_a = A.get("shapes") or {}
-    numel_a = {}
-    for src in (A["tensors"], A.get("values") or {}):
-        for name, h in src.items():
-            n = 1
-            for d in shapes_a.get(name, []):
-                n *= d
-            numel_a.setdefault(h, set()).add(n)
-    shapes_b = B.get("shapes") or {}
-    values_b = B.get("values") or {}
-    n_exact = n_value = n_shape = n_numel = 0
-    unmatched = []
-    for name, hb in B["tensors"].items():
-        numel_b = 1
-        for d in shapes_b.get(name, []):
-            numel_b *= d
-        if exact.get(hb, 0) > 0:
-            exact[hb] -= 1
-            pool[hb] -= 1
-            n_exact += 1
-            if numel_b in numel_a.get(hb, set()):
-                n_shape += 1
+    free_a, free_b = set(A["tensors"]), set(B["tensors"])
+    exact, candidates = [], []
+    buckets = defaultdict(deque)
+    for name in sorted(free_a):
+        buckets[A["tensors"][name]].append(name)
+    for name in sorted(free_b):
+        bucket = buckets[B["tensors"][name]]
+        if bucket:
+            source = bucket.popleft()
+            exact.append((source, name)); free_a.remove(source)
+    free_b.difference_update(name for _, name in exact)
+    # Match typed value-to-value evidence before ambiguous legacy hits can take
+    # its source. A raw integer digest is never promoted to an F32 fingerprint.
+    buckets = defaultdict(deque)
+    for name in sorted(free_a):
+        digest = normalized_fingerprint(A, name)
+        if digest is not None:
+            buckets[digest].append(name)
+    for name in sorted(free_b):
+        digest = normalized_fingerprint(B, name)
+        if digest is not None and buckets[digest]:
+            source = buckets[digest].popleft()
+            candidates.append((source, name)); free_a.remove(source)
+    free_b.difference_update(name for _, name in candidates)
+    buckets = defaultdict(deque)
+    for name in sorted(free_a):
+        for digest in sorted({A["tensors"][name], A.get("values", {}).get(name)} - {None}):
+            buckets[digest].append(name)
+    for name in sorted(free_b):
+        for digest in sorted({B["tensors"][name], B.get("values", {}).get(name)} - {None}):
+            bucket = buckets[digest]
+            while bucket and bucket[0] not in free_a:
+                bucket.popleft()
+            if bucket:
+                source = bucket.popleft()
+                candidates.append((source, name)); free_a.remove(source)
+                break
+    free_b.difference_update(name for _, name in candidates)
+    return exact, candidates, sorted(free_a), sorted(free_b)
+
+
+def blob_identity(A, B):
+    """Compatibility tuple; legacy hashes cannot establish numeric or shape agreement."""
+    exact, candidates, _, unmatched = match_blobs(A, B)
+    return len(exact), len(candidates), len(B["tensors"]), 0, 0, unmatched
+
+
+def read_baseline(path):
+    base = json_object(path)
+    digest = lambda h: isinstance(h, str) and re.fullmatch(r"[0-9a-fA-F]{64}", h) is not None
+    if not isinstance(base.get("tensors"), dict) or not all(digest(v) for v in base["tensors"].values()):
+        raise ValueError("baseline tensors must map names to SHA-256 digests")
+    if "file_sha256" in base and not digest(base["file_sha256"]):
+        raise ValueError("invalid file_sha256")
+    if "format" in base and not isinstance(base["format"], str):
+        raise ValueError("baseline format must be text")
+    for key, validator in (("values", digest), ("shapes", valid_shape)):
+        if key not in base:
             continue
-        hv = values_b.get(name, hb)
-        if pool.get(hv, 0) > 0:
-            pool[hv] -= 1
-            n_value += 1
-            if numel_b in numel_a.get(hv, set()):
-                n_numel += 1
-            continue
-        unmatched.append(name)
-    return n_exact, n_value, len(B["tensors"]), n_shape, n_numel, sorted(unmatched)
+        if not isinstance(base[key], dict) or not set(base[key]) <= set(base["tensors"]) or not all(validator(v) for v in base[key].values()):
+            raise ValueError(f"invalid baseline {key} mapping")
+    if "value_metadata" in base:
+        metadata = base["value_metadata"]
+        if (not isinstance(metadata, dict) or not set(metadata) <= set(base.get("values", {}))
+                or not all(isinstance(v, dict) and all(isinstance(v.get(k), str)
+                    for k in ("dtype", "byte_order", "normalization")) for v in metadata.values())):
+            raise ValueError("invalid baseline value_metadata mapping")
+    for key in ("tensors", "values"):
+        if key in base:
+            base[key] = {name: value.lower() for name, value in base[key].items()}
+    for name, meta in base.get("value_metadata", {}).items():
+        if (meta["dtype"] == "F32" and normalized_fingerprint(base, name) is not None
+                and base["values"][name] != base["tensors"][name]):
+            raise ValueError("F32 little-endian value hash must equal its byte hash")
+    return base
 
 
 def diff_baselines(file_a, file_b, rep):
-    """Compare two .tensorhashes.json baselines of the same base model."""
-    A = json.loads(Path(file_a).read_text())
-    B = json.loads(Path(file_b).read_text())
+    A, B = read_baseline(file_a), read_baseline(file_b)
     ta, tb = A["tensors"], B["tensors"]
-    rep.add("INFO", "diff", f"A: {file_a} (file sha {A.get('file_sha256','?')[:16]}…)")
-    rep.add("INFO", "diff", f"B: {file_b} (file sha {B.get('file_sha256','?')[:16]}…)")
-    only_a = sorted(set(ta) - set(tb))
-    only_b = sorted(set(tb) - set(ta))
-    changed = sorted(k for k in set(ta) & set(tb) if ta[k] != tb[k])
-    fa, fb = A.get("format", "?"), B.get("format", "?")
-    if fa != fb:
-        rep.add("WARN", "diff", f"comparing a {fa} baseline with a {fb} one — names and precision differ "
-                                f"between formats, so a per-name comparison is not meaningful and the "
-                                f"abliteration/re-training classification is skipped. Use the content match "
-                                f"below instead")
-        rep.add("INFO", "diff", f"name sets: {len(only_a)} only in A, {len(only_b)} only in B, "
-                                f"{len(set(ta) & set(tb))} in common (per-name listing skipped for cross-format)")
-        matched, value_equal, total, shape_ok, numel_ok, unmatched = blob_identity(A, B)
-        if total and matched + value_equal == total:
-            rep.add("OK", "diff", f"content match: all {total} weight blobs in B carry values identical to "
-                                  f"blobs in A ({matched} byte-identical, {value_equal} identical after a "
-                                  f"storage-type change such as a bf16 norm upcast to f32) — consistent with "
-                                  f"a lossless conversion of the same weights: naming and container changed, "
-                                  f"the numbers did not")
-        else:
-            rep.add("INFO", "diff", f"content match: {matched} of {total} weight blobs in B are byte-identical "
-                                    f"to blobs in A, {value_equal} more carry identical values in a different "
-                                    f"storage type, and {len(unmatched)} differ. Quantized formats transform "
-                                    f"values by design, so a low count means 'not comparable this way', not "
-                                    f"'tampered' — only a lossless conversion is expected to match")
-            for name in unmatched[:8]:
-                rep.add("INFO", "diff", f"not matched: {name}")
-            if len(unmatched) > 8:
-                rep.add("INFO", "diff", f"… and {len(unmatched) - 8} more unmatched blobs")
-            if unmatched:
-                rep.add("INFO", "diff", "an unmatched blob can be a table the converter computes rather than a "
-                                        "weight (rope frequency tables), a block whose values quantization "
-                                        "transformed by design, or a genuinely different weight — this tool "
-                                        "cannot tell those apart, so it names them and stops there")
-        if matched:
-            rep.add("INFO", "diff", f"shape agreement: {shape_ok} of the {matched} byte-identical blobs also "
-                                    f"agree on shape (dimension order differs between formats, so this compares "
-                                    f"dims as a set)")
-        if value_equal:
-            rep.add("INFO", "diff", f"value agreement: {numel_ok} of the {value_equal} value-identical blobs "
-                                    f"hold the same number of elements — the difference is the storage type, "
-                                    f"not the content")
+    rep.add("INFO", "diff", f"A: {file_a}; B: {file_b}")
+    scope = "Recorded tensor bytes and shapes only; dtype, byte order, semantic roles and trust NOT VERIFIED"
+    fa, fb = A.get("format"), B.get("format")
+    if fa not in ("gguf", "safetensors") or fb not in ("gguf", "safetensors") or fa != fb:
+        scope = "Recorded byte and typed normalized-F32 fingerprints only; cross-format shapes, semantic roles, model equivalence, history and trust NOT VERIFIED"
+        rep.add("INFO", "diff", "comparing across formats or legacy unknown formats: matching content does not establish tensor-role mapping or conversion history")
+        exact, candidates, only_a, only_b = match_blobs(A, B)
+        normalized = [(a, b) for a, b in candidates if normalized_fingerprint(A, a) is not None
+                      and normalized_fingerprint(A, a) == normalized_fingerprint(B, b)]
+        ambiguous = len(candidates) - len(normalized)
+        rep.add("INFO", "diff", f"content match: {len(exact)} of {len(tb)} B blobs are byte-identical; {len(normalized)} exact normalized-F32 fingerprint matches; {ambiguous} normalized-hash candidates (INCONCLUSIVE); {len(only_a)} unmatched in A, {len(only_b)} unmatched in B")
+        if ambiguous:
+            rep.add("WARN", "diff", "normalized-hash candidates lack compatible typed normalization metadata: numeric equivalence and lossless conversion are not established")
+        if not ta or not tb:
+            rep.add("WARN", "diff", "baseline comparison incomplete: empty tensor inventory")
+        rep.add("INFO", "diff", "Nonmatches are not comparable this way; quantization can change values by design. No model identity, numeric equivalence, role mapping or tampering conclusion follows.")
+        for side, names in (("A", only_a), ("B", only_b)):
+            for name in names[:8]:
+                rep.add("INFO", "diff", f"not matched in {side}: {name}")
+        full = bool(ta and tb) and not (only_a or only_b or ambiguous) and {fa, fb} <= {"gguf", "safetensors"}
+        rep.observe("baseline", "PASS" if full else "CONCERN",
+                    "Both nonempty inventories agree on recorded byte or typed normalized-F32 fingerprints" if full else
+                    "Cross-format or legacy comparison is inconclusive, including ambiguous, empty or subset matches", scope)
         return
-    same = len(set(ta) & set(tb)) - len(changed)
-    for k in only_a:
-        rep.add("WARN", "diff", f"tensor only in A (removed in B): {k}")
-    for k in only_b:
-        rep.add("WARN", "diff", f"tensor only in B (added/renamed): {k}")
-    for k in changed:
-        rep.add("CRIT", "diff", f"TENSOR CONTENT CHANGED: {k}  ({ta[k][:12]}… -> {tb[k][:12]}…)")
-    rep.add("INFO", "diff", f"{same} tensors identical, {len(changed)} changed, "
-                            f"{len(only_a)} removed, {len(only_b)} added")
-    total = len(changed) + len(only_a) + len(only_b)
-    if total == 0:
-        rep.add("OK", "diff", "baselines are byte-identical tensor-wise")
-        return
-    # classify: abliteration-style (few tensors, at common edit sites) vs broad change
-    edit_sites = sum(1 for k in changed if any(s in k for s in ABLIT_SITES))
-    if 0 < len(changed) <= 8 and not only_a and not only_b and edit_sites >= max(1, len(changed) // 2):
-        rep.add("INFO", "diff", f"pattern matches targeted weight edits (abliteration-class: "
-                                f"{edit_sites}/{len(changed)} at ffn_down/ffn_out/attn_o sites)")
-    elif total > 8:
-        rep.add("CRIT", "diff", f"BROAD tensor differences ({total}: {len(changed)} changed, "
-                                f"{len(only_a)} removed, {len(only_b)} added) — consistent with "
-                                f"re-quantization, post-quantization training, or large-scale "
-                                f"tampering. Without a trusted chain of custody, treat B as a "
-                                f"different model, not a copy.")
+    common = set(ta) & set(tb)
+    only_a, only_b = sorted(set(ta) - set(tb)), sorted(set(tb) - set(ta))
+    changed = sorted(k for k in common if ta[k] != tb[k])
+    sa, sb = A.get("shapes", {}), B.get("shapes", {})
+    missing = sorted(k for k in common if k not in sa or k not in sb)
+    reshaped = sorted(k for k in common if k in sa and k in sb and sa[k] != sb[k])
+    for name in only_a:
+        rep.add("WARN", "diff", f"tensor only in A (removed in B): {name}")
+    for name in only_b:
+        rep.add("WARN", "diff", f"tensor only in B (added/renamed): {name}")
+    for name in changed:
+        rep.add("CRIT", "diff", f"TENSOR CONTENT CHANGED: {name} — cause not determined")
+    for name in reshaped:
+        rep.add("CRIT", "diff", f"TENSOR SHAPE CHANGED: {name} — recorded shape differs")
+    if missing or not ta or not tb:
+        rep.add("WARN", "diff", "baseline comparison incomplete: missing shape metadata or empty tensor set")
+    differences = bool(changed or reshaped or only_a or only_b)
+    status = "FAIL" if differences else ("CONCERN" if missing or not ta else "PASS")
+    rep.observe("baseline", status, "Recorded bytes/shapes differ" if differences else ("Legacy or empty baseline is inconclusive" if status == "CONCERN" else "Both tensor sets agree on recorded bytes and shapes"), scope)
+    rep.add("INFO", "diff", scope)
+    if status == "PASS":
+        rep.add("OK", "diff", "baselines agree on recorded tensor bytes and shapes; this does not prove safety or model equivalence")
 
 
 def cmd_diff(args):
+    return run_cli_report(lambda rep: diff_baselines(args.baseline_a, args.baseline_b, rep), args.json, "baseline")
+
+
+def run_cli_report(operation, as_json, domain):
     rep = Report()
-    diff_baselines(args.baseline_a, args.baseline_b, rep)
-    rep.print(as_json=args.json)
-    crits = sum(1 for s, *_ in rep.items if s == "CRIT")
-    warns = sum(1 for s, *_ in rep.items if s == "WARN")
-    print(f"\n== diff: {crits} critical, {warns} warnings ==")
-    sys.exit(2 if crits else (1 if warns else 0))
+    try:
+        operation(rep)
+    except (OSError, ValueError, TypeError, OverflowError) as e:
+        rep.add("CRIT", "audit", f"input error: {e}")
+        rep.observe(domain, "NOT CHECKED", "Requested operation could not complete", "input/output error")
+    add_rubric(rep)
+    rep.print(as_json=as_json)
+    return rep.exit_code()
 
 
 def main():
     ap = argparse.ArgumentParser(description="audit a GGUF or safetensors file for supply-chain tampering")
     ap.add_argument("--version", action="version", version=f"model-audit {VERSION}")
     ap.add_argument("model", type=Path, nargs="?", help="model file to audit (GGUF or safetensors; format auto-detected)")
-    ap.add_argument("--tensor-hashes", action="store_true", help="emit per-tensor SHA-256 baseline JSON")
+    ap.add_argument("--tensor-hashes", action="store_true", help="emit a new per-tensor SHA-256 baseline JSON; never overwrite")
+    ap.add_argument("--baseline-out", type=Path, help="new baseline destination (requires --tensor-hashes)")
     ap.add_argument("--hf", metavar="USER/REPO", help="cross-check local sha256 against HF LFS hash")
-    ap.add_argument("--revision", metavar="COMMIT_SHA", default=None,
-                    help="pin the HF commit to compare against (never trust 'main' long-term)")
+    ap.add_argument("--revision", metavar="REVISION", default=None, help="HF revision to resolve; output records the full resolved commit")
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--diff", metavar=("A", "B"), nargs=2, default=None,
-                    help="compare two .tensorhashes.json baselines instead of auditing")
-
+    ap.add_argument("--diff", metavar=("A", "B"), nargs=2, default=None, help="compare two .tensorhashes.json baselines")
     a = ap.parse_args()
+    if a.baseline_out is not None and (not a.tensor_hashes or a.diff):
+        ap.error("--baseline-out requires --tensor-hashes and an audit, not --diff")
     if a.diff:
-        rep = Report()
-        diff_baselines(a.diff[0], a.diff[1], rep)
-        rep.print(as_json=a.json)
-        crits = sum(1 for s, *_ in rep.items if s == "CRIT")
-        warns = sum(1 for s, *_ in rep.items if s == "WARN")
-        print(f"\n== diff: {crits} critical, {warns} warnings ==")
-        sys.exit(2 if crits else (1 if warns else 0))
+        return run_cli_report(lambda rep: diff_baselines(a.diff[0], a.diff[1], rep), a.json, "baseline")
     if not a.model:
         ap.print_help()
-        sys.exit(0)
-    if not a.model.exists():
-        sys.exit(f"not found: {a.model}")
-    rep = Report()
-    audit(a.model, rep, do_hashes=a.tensor_hashes, hf_repo=a.hf, hf_revision=a.revision)
-    rep.print(as_json=a.json)
-    crits = sum(1 for s, *_ in rep.items if s == "CRIT")
-    warns = sum(1 for s, *_ in rep.items if s == "WARN")
-    print(f"\n== {a.model.name}: {crits} critical, {warns} warnings ==")
-    sys.exit(2 if crits else (1 if warns else 0))
+        return 0
+    return run_cli_report(lambda rep: audit(a.model, rep, do_hashes=a.tensor_hashes,
+        hf_repo=a.hf, hf_revision=a.revision, baseline_out=a.baseline_out), a.json, "structure")
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

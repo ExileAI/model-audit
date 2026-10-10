@@ -13,8 +13,8 @@ Two or three "no" answers → treat the file as untrusted no matter what any aud
 
 ## 1. At download: pin and record
 
-Record three things in a note next to the model — the moment you download is the only
-time you can pin history:
+Record three things in a note next to the model — recording the resolved commit at download preserves the
+snapshot you intended to compare:
 
 ```
 repo:     <uploader>/<model-name>
@@ -29,17 +29,24 @@ python3 model_audit.py model.gguf --hf <uploader>/<repo> --revision <commit_sha>
 python3 model_audit.py model.gguf --tensor-hashes
 ```
 
-- The first command proves your copy is what the repo published at that commit.
+- A successful first check establishes a byte match to the identified remote file
+  at that commit; a failed or unavailable lookup does not.
   (It works the same for `model.safetensors` — the format is auto-detected.)
 - If the repo ships its own hash list (`MANIFEST.txt`, `SHA256SUMS`, `*.sha256`), the
   audit checks your file against it and tells you if the file was renamed after hashing.
   A mismatch under the file's own name is a red flag.
 - The second writes `model.gguf.tensorhashes.json` — the per-weight fingerprint.
-  **Keep it next to the model, forever.** It is your evidence that the weights you
-  run today are the weights you audited today.
+  **Keep that original reference.** Existing destinations are refused rather than
+  overwritten, with WARN and exit 1 (exit 2 if another finding is CRIT). Choose a
+  new destination with `--baseline-out`. This fingerprints the audited bytes; it
+  does not prove the weights safe.
 
-Read the report. CRIT findings → do not load the model, full stop. Warnings → read
-each explanation; tool-calling models trip "file I/O"-style patterns legitimately.
+Read the report. `CRITICAL FINDINGS: REVIEW BEFORE LOADING` means investigate before
+loading. `WARNINGS: REVIEW THE DETAILS` means read each explanation; tool-calling
+models trip "file I/O"-style patterns legitimately. `NO RED FLAGS IN COMPLETED CHECKS`
+does not cover anything absent or uninspected and does not promise safety.
+An empty safetensors tensor gets an inventory-heuristic WARN but remains
+structurally legal and baseline-eligible.
 
 ### 2b. If the model is safetensors, hash the sidecars too
 
@@ -51,10 +58,10 @@ on their own, so hash them alongside the weights:
 sha256sum model.safetensors *.jinja tokenizer_config.json config.json > SIDECARS.sha256
 ```
 
-The audit already scans every one of those templates for hostile content — but the
+The audit scans supported template representations for known suspicious patterns — but the
 hash is what lets you prove later that the file you read is still the file in place.
 
-### 2c. If you have the source tree, prove the conversion
+### 2c. Compare source and converted fingerprint evidence
 
 When a build ships both the fp/bf16 source and a converted GGUF, fingerprint both and
 compare across formats:
@@ -65,19 +72,48 @@ python3 model_audit.py model-Q8_0.gguf   --tensor-hashes
 python3 model_audit.py --diff model.safetensors.tensorhashes.json model-Q8_0.gguf.tensorhashes.json
 ```
 
-- A **lossless** conversion matches on every blob: byte-identical where the container type
-  is the same, and value-identical where the converter changed only the storage type (bf16
-  norms widened to f32 keep their numbers exactly). That is the strongest statement this
-  tool can make about provenance: the build carries the weights of a tree you audited.
-- A **quantized** build matches only on the tensors quantization leaves untouched (usually
-  the norms). The rest is reported as "not comparable this way" — quantization transforms
-  values by design, so that is not a red flag.
+- Matching proceeds by bytes first, supported typed normalized fingerprints second,
+  then ambiguous candidates. The counts stay separate; each source and destination
+  tensor is consumed at most once. Both unmatched sides have complete counts and
+  up to eight names each.
+- New baselines preserve `tensors`, `values`, and `shapes` and add optional per-tensor
+  `value_metadata` (`dtype`, `byte_order: "little"`, `normalization: "f32-le-bits-v1"`).
+  Little-endian BF16/F32 tensors have explicit normalized `values` hashes,
+  including F32. Only value-to-value matches with supported metadata on both sides
+  establish an **exact normalized-F32-fingerprint match**. Big- or unknown-endian GGUF
+  tensors get byte hashes only, without value claims.
+- F16's existing struct-based normalized hash is only a legacy/inconclusive
+  candidate because it does not preserve NaN payload bits. Baseline validation
+  rejects typed F32 metadata whose byte and normalized hashes contradict each other.
+- BF16 widening to F32 is mathematically exact. Matching fingerprints establish
+  consistency of the normalized bitstream, not historical lineage or a lossless
+  whole-model conversion. A known container format cannot prove a raw hash's dtype:
+  an old BF16 value hash can match I32 raw bits. Legacy/ambiguous candidates remain
+  INCONCLUSIVE and get WARN findings.
+- Cross-format PASS requires nonempty, full byte/typed-normalized correspondence.
+  It does not check shapes, semantic roles, numerical/model equivalence, or history.
+  Unknown formats, ambiguous candidates, empty inventories, and partial matches
+  remain CONCERN. Empty inventories receive WARN; general comparison limits are INFO.
+- A **quantized** build typically matches on tensors left unquantized (usually the
+  norms). The rest is reported as "not comparable this way" — quantization transforms
+  values by design, so nonmatches are INFO and a comparison CONCERN, not evidence
+  of tampering. A CONCERN may therefore accompany exit 0; read the rubric too.
 - Names differ between formats (`blk.0.attn_q` vs `model.layers.0.self_attn.q_proj`) and so
   can dimension order; the comparison matches by content for exactly that reason.
 
 ## 3. Whenever you re-download or copy the model
 
-Re-run both commands. The `--tensor-hashes` JSON now pays off:
+Preserve the original baseline and write a distinct new one:
+
+```bash
+python3 model_audit.py model.gguf --hf <uploader>/<repo> --revision <original_commit_sha>
+python3 model_audit.py model.gguf --tensor-hashes --baseline-out model.new.json
+python3 model_audit.py --diff model.gguf.tensorhashes.json model.new.json
+```
+
+Choose a fresh destination for each snapshot; neither output replaces your reference.
+Finding exit codes are expected when differences or warnings are present. Read the
+findings rather than treating exit 1/2 as successful verification.
 
 - Same file SHA-256 → identical copy.
 - Different SHA-256 but you need to know *what* changed → compare tensor baselines
@@ -94,8 +130,9 @@ Re-run both commands. The `--tensor-hashes` JSON now pays off:
 - Never enable `trust_remote_code` for a model you have not read. If the audit reports
   `auto_map` in `config.json` or `tokenizer_config.json`, the repo ships Python that
   your loader will execute — that is code you are running, not weights you are loading.
-- Re-check the repo occasionally: if the pinned revision's files change upstream,
-  your copy is now the only honest one — and the uploader has some explaining to do.
+- Retain the full resolved upstream commit. A mismatch or unavailable reference
+  needs investigation; it alone does not prove a force-push, malicious replacement,
+  or that either copy is honest.
 
 ## What this workflow still cannot do
 
