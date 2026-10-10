@@ -10,13 +10,14 @@ Every audited file gets one of three banners:
 
 | banner | meaning | what to do |
 |---|---|---|
-| **NO RED FLAGS FOUND** | completed checks found no known suspicious patterns; read coverage too | nothing required; save a fingerprint baseline if the model matters to you |
-| **USE WITH AWARENESS** | something needs your attention, but the file isn't clearly hostile | read each warning's plain-language note; many are false positives from tool-calling models |
-| **DO NOT RUN THIS FILE** | a critical problem was found | delete or quarantine it; get the model from a source that documents its build, or make it yourself |
+| **NO RED FLAGS IN COMPLETED CHECKS** | completed checks found no known suspicious patterns; read coverage too | review any uninspected areas; save a fingerprint baseline if comparison matters |
+| **WARNINGS: REVIEW THE DETAILS** | something needs your attention | read each warning's plain-language explanation |
+| **CRITICAL FINDINGS: REVIEW BEFORE LOADING** | a critical finding needs investigation | resolve it before loading; it does not establish malicious intent |
 
-The three are a *scale of evidence*, not a scale of blame. "NO RED FLAGS" means
-nothing hostile was found — it is **not** a promise that the weights are safe, and
-**not** a statement that the uploader is trustworthy. See the bottom of the report.
+The three summarize finding severity, not blame. "NO RED FLAGS IN COMPLETED CHECKS"
+means no known suspicious patterns were found in completed checks — it is **not**
+a promise that the weights are safe, and **not** a statement that the uploader is
+trustworthy. See the bottom of the report.
 
 ## Evidence rubric and coverage
 
@@ -30,8 +31,33 @@ COMPLETE/INCOMPLETE describes requested applicable coverage, not model safety.
 Optional unrequested remote checks do not count as failures. A template signature
 can be CONCERN while its original severity remains Critical. A checksum PASS
 means only agreement with the named source, not that the source is trusted.
-Baseline PASS is limited to recorded bytes and shapes: dtype, byte order, tensor
-roles, and model behavior remain unverified. There is no overall numeric score.
+Same-format baseline PASS is limited to recorded bytes and shapes: dtype, byte
+order, tensor roles, and model behavior remain unverified. Cross-format PASS has
+a different scope: nonempty, full one-to-one correspondence by bytes or supported
+typed normalized fingerprints. It does not check shapes, semantic roles,
+numerical/model equivalence, or conversion history. Unknown formats, ambiguous
+candidates, empty inventories, and partial matches remain CONCERN. There is no
+overall numeric score.
+
+Cross-format comparisons use byte matches first, typed normalized matches second,
+and ambiguous candidates last. Each tensor is used at most once; unmatched tensors
+on both sides are reported with complete counts and up to eight names each.
+An **exact normalized-F32-fingerprint match** requires
+explicit normalized hashes and supported dtype, little-endian byte order, and
+`f32-le-bits-v1` metadata on both sides, for BF16 or F32. BF16 widening to F32 is
+mathematically exact; a matching fingerprint establishes consistency of the
+normalized bitstream, not a lossless whole-model conversion or historical lineage.
+F16's older normalization remains an inconclusive candidate because it does not
+preserve NaN payload bits. Contradictory byte and normalized hashes for typed F32
+metadata are rejected when validating a baseline.
+
+Older baselines remain readable, but an untyped normalized hash matching a raw
+hash is **INCONCLUSIVE**. A known file format does not tell us the raw tensor's
+dtype; I32 bits, for example, could match a BF16 normalized fingerprint. Actual
+ambiguous candidates and empty inventories get Warning findings. General comparison
+limits and quantized nonmatches are Info; a partial quantized comparison can be
+CONCERN even with exit 0 and does not itself suggest tampering. Big- or unknown-endian
+GGUF tensors provide byte fingerprints only, without normalized-value claims.
 
 ## The identity card
 
@@ -49,13 +75,20 @@ A small table describes what the file *claims* to be:
 Below the banner, every finding is tagged:
 
 - 🔴 **Critical** — a critical signal, invalid structure, or hard error (for example,
-  invisible template characters). These set DO NOT RUN; they do not prove intent.
+  invisible template characters). These set CRITICAL FINDINGS: REVIEW BEFORE LOADING;
+  they do not prove intent.
 - 🟠 **Warning** — something unusual that deserves a look. Often benign; read the
   plain-language note under it before worrying.
-- ⚪ **Info** — a fact about the file, recorded for completeness. Not a problem.
+- ⚪ **Info** — context or a limit on the comparison, rather than a warning by itself.
 
 Warnings and Info lines each carry a one-sentence explanation in plain language —
 that note is usually all you need.
+
+An empty safetensors tensor is structurally legal and can be fingerprinted for a
+baseline, but receives an inventory-heuristic Warning worth reviewing. An existing
+baseline output destination also gets a Warning and exit 1, unless an unrelated
+Critical finding sets exit 2. It is never overwritten; choose a fresh destination
+with `--baseline-out`.
 
 ## What the report can and cannot tell you
 
@@ -69,9 +102,11 @@ that note is usually all you need.
 
 ## A worked example
 
-`examples/report-04-do-not-run-template-swap.html` is a DO NOT RUN report — on a
-model that is **not** suspect. We took a clean model and replaced only its chat
-template with a hostile one, changing nothing else. Compare it with
+The committed files under `examples/` are legacy samples with older banners and
+explanations. `examples/report-04-do-not-run-template-swap.html` has the historical
+DO NOT RUN banner: its chat template was replaced with a hostile one, changing
+nothing else. The example does not establish the safety of the unchanged weights.
+Compare it with
 `examples/report-01-clean-gemma-12b-obliterated.html`: same model, opposite
 verdicts. It is the clearest possible illustration of what the audit is actually
 looking at — and of how much one metadata string can matter.

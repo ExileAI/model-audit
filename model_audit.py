@@ -155,6 +155,10 @@ def sha256_at(path, offset, length):
 # conversion: the bytes change, the values do not, and a byte-only comparison would call
 # an honest conversion "different".
 EXPANDABLE = {"BF16": 2, "F16": 2, "F32": 4}
+# BF16 bit shifts and F32 identity preserve all bits, including NaN payloads.
+# F16 uses struct conversion and is deliberately outside this stronger contract.
+VALUE_NORMALIZATION = "f32-le-bits-v1"
+BIT_PRESERVING = {"BF16", "F32"}
 
 def _to_f32_bytes(chunk, dtype):
     """Widen a chunk of BF16/F16/F32 little-endian bytes to f32, exactly."""
@@ -504,7 +508,8 @@ def st_tensors(hdr, data_start, size, rep):
                                           f"{int(numel * unit):,} bytes, but the header declares {n_bytes:,} — "
                                           f"the header contradicts itself")
         if n_bytes == 0 or any(d == 0 for d in shape):
-            rep.add("INFO", "st-tensors", f"tensor size: {name} is empty ({dtype} {list(shape)})")
+            rep.add("WARN", "st-tensors", f"empty tensor: {name} is empty ({dtype} {list(shape)}) — "
+                                         "legal in safetensors; inventory heuristic only, review whether intended")
         tensors.append(STTensor(name, shape, dtype, data_start + begin, n_bytes))
         spans.append((begin, end, name))
     spans.sort()
@@ -791,30 +796,43 @@ def hf_check(repo, local_sha, path, rep, revision=None):
         rep.observe("provenance", "NOT CHECKED", "Remote lookup failed", scope)
 
 # ---------------- baseline tensor hash dump / compare ----------------
-def dump_tensor_hashes(tensors, path):
+def dump_tensor_hashes(tensors, path, byte_order="little"):
     """Per-tensor byte hashes, plus value hashes where widening to f32 is exact."""
     out, vals = {}, {}
     for t in tensors:
         dtype = getattr(t, "dtype", None) or t.tensor_type.name
-        hb, hv = tensor_fingerprints(path, t.data_offset, t.n_bytes, dtype)
+        # Raw on-disk GGUF bytes may be big-endian. Do not interpret those as LE.
+        hb, hv = tensor_fingerprints(path, t.data_offset, t.n_bytes,
+                                     dtype if byte_order == "little" else None)
         out[t.name] = hb
-        if hv and hv != hb:  # F32 needs no separate value hash; it is the byte hash
+        if hv:
             vals[t.name] = hv
     return out, vals
 
-def write_baseline(tensors, path, sha, fmt, rep, baseline_out=None):
-    hashes, values = dump_tensor_hashes(tensors, path)
+def write_baseline(tensors, path, sha, fmt, rep, baseline_out=None, byte_order=None):
+    # safetensors is little-endian by definition; GGUF must supply reader evidence.
+    byte_order = "little" if fmt == "safetensors" else byte_order
+    hashes, values = dump_tensor_hashes(tensors, path, byte_order)
     shapes = {t.name: [int(d) for d in t.shape] for t in tensors}
+    value_metadata = {t.name: dict(dtype=getattr(t, "dtype", None) or t.tensor_type.name,
+                                  byte_order=byte_order, normalization=VALUE_NORMALIZATION)
+                      for t in tensors if t.name in values
+                      and (getattr(t, "dtype", None) or t.tensor_type.name) in BIT_PRESERVING}
     outp = Path(baseline_out) if baseline_out is not None else path.with_suffix(path.suffix + ".tensorhashes.json")
-    created = False
+    # Only an exclusive-open conflict is a recoverable output warning. Other I/O
+    # errors still propagate, and previously collected critical findings survive.
     try:
-        with outp.open("x", encoding="utf-8") as stream:
-            created = True
+        stream = outp.open("x", encoding="utf-8")
+    except FileExistsError:
+        rep.add("WARN", "baseline", f"baseline exists: {outp} — pass --baseline-out to write a new snapshot; existing file unchanged")
+        return
+    try:
+        with stream:
             json.dump({"file_sha256": sha, "format": fmt, "shapes": shapes,
-                       "tensors": hashes, "values": values}, stream, indent=1)
+                       "tensors": hashes, "values": values,
+                       "value_metadata": value_metadata}, stream, indent=1)
     except Exception:
-        if created:
-            outp.unlink()
+        outp.unlink()
         raise
     rep.add("OK", "baseline", f"per-tensor SHA-256 written to {outp}")
 
@@ -869,7 +887,8 @@ def _audit_gguf(path, rep, sha, size, do_hashes, hf_repo, hf_revision, baseline_
     check_sidecars(path, rep)
     check_manifest(path, sha, rep)
     if do_hashes and not invalid:
-        write_baseline(tensors, path, sha, "gguf", rep, baseline_out)
+        byte_order = "little" if rdr.endianess == gguf.GGUFEndian.LITTLE else "big"
+        write_baseline(tensors, path, sha, "gguf", rep, baseline_out, byte_order)
     if hf_repo:
         hf_check(hf_repo, sha, path, rep, revision=hf_revision)
 
@@ -920,8 +939,21 @@ def audit(path, rep, do_hashes=False, hf_repo=None, hf_revision=None, baseline_o
     rep.observe("templates", "NOT CHECKED", "Artifact format not recognized", "template scan")
     rep.add("CRIT", "file", f"bad magic {magic!r} — not a GGUF or safetensors file")
 
+def normalized_fingerprint(base, name):
+    """Return only a self-described F32 digest; never interpret an untyped byte hash."""
+    meta = base.get("value_metadata", {}).get(name, {})
+    if (meta.get("dtype") in BIT_PRESERVING and meta.get("byte_order") == "little"
+            and meta.get("normalization") == VALUE_NORMALIZATION):
+        return base.get("values", {}).get(name)
+    return None
+
+
 def match_blobs(A, B):
-    """Consume tensor identities once using stable hash buckets, byte matches first."""
+    """Consume once: byte matches, typed F32 matches, then ambiguous candidates.
+
+    The four-value return stays compatible; callers can identify typed pairs with
+    normalized_fingerprint(). Metadata describes a hash, not its producer's trust.
+    """
     free_a, free_b = set(A["tensors"]), set(B["tensors"])
     exact, candidates = [], []
     buckets = defaultdict(deque)
@@ -933,6 +965,19 @@ def match_blobs(A, B):
             source = bucket.popleft()
             exact.append((source, name)); free_a.remove(source)
     free_b.difference_update(name for _, name in exact)
+    # Match typed value-to-value evidence before ambiguous legacy hits can take
+    # its source. A raw integer digest is never promoted to an F32 fingerprint.
+    buckets = defaultdict(deque)
+    for name in sorted(free_a):
+        digest = normalized_fingerprint(A, name)
+        if digest is not None:
+            buckets[digest].append(name)
+    for name in sorted(free_b):
+        digest = normalized_fingerprint(B, name)
+        if digest is not None and buckets[digest]:
+            source = buckets[digest].popleft()
+            candidates.append((source, name)); free_a.remove(source)
+    free_b.difference_update(name for _, name in candidates)
     buckets = defaultdict(deque)
     for name in sorted(free_a):
         for digest in sorted({A["tensors"][name], A.get("values", {}).get(name)} - {None}):
@@ -970,9 +1015,19 @@ def read_baseline(path):
             continue
         if not isinstance(base[key], dict) or not set(base[key]) <= set(base["tensors"]) or not all(validator(v) for v in base[key].values()):
             raise ValueError(f"invalid baseline {key} mapping")
+    if "value_metadata" in base:
+        metadata = base["value_metadata"]
+        if (not isinstance(metadata, dict) or not set(metadata) <= set(base.get("values", {}))
+                or not all(isinstance(v, dict) and all(isinstance(v.get(k), str)
+                    for k in ("dtype", "byte_order", "normalization")) for v in metadata.values())):
+            raise ValueError("invalid baseline value_metadata mapping")
     for key in ("tensors", "values"):
         if key in base:
             base[key] = {name: value.lower() for name, value in base[key].items()}
+    for name, meta in base.get("value_metadata", {}).items():
+        if (meta["dtype"] == "F32" and normalized_fingerprint(base, name) is not None
+                and base["values"][name] != base["tensors"][name]):
+            raise ValueError("F32 little-endian value hash must equal its byte hash")
     return base
 
 
@@ -983,14 +1038,25 @@ def diff_baselines(file_a, file_b, rep):
     scope = "Recorded tensor bytes and shapes only; dtype, byte order, semantic roles and trust NOT VERIFIED"
     fa, fb = A.get("format"), B.get("format")
     if fa not in ("gguf", "safetensors") or fb not in ("gguf", "safetensors") or fa != fb:
-        rep.add("WARN", "diff", "comparing across formats or legacy unknown formats: normalized hash matches are candidates only; numeric equivalence and lossless conversion are not established")
+        scope = "Recorded byte and typed normalized-F32 fingerprints only; cross-format shapes, semantic roles, model equivalence, history and trust NOT VERIFIED"
+        rep.add("INFO", "diff", "comparing across formats or legacy unknown formats: matching content does not establish tensor-role mapping or conversion history")
         exact, candidates, only_a, only_b = match_blobs(A, B)
-        rep.add("INFO", "diff", f"content match: {len(exact)} of {len(tb)} B blobs are byte-identical; {len(candidates)} normalized-hash candidates (INCONCLUSIVE); {len(only_a)} unmatched in A, {len(only_b)} unmatched in B")
+        normalized = [(a, b) for a, b in candidates if normalized_fingerprint(A, a) is not None
+                      and normalized_fingerprint(A, a) == normalized_fingerprint(B, b)]
+        ambiguous = len(candidates) - len(normalized)
+        rep.add("INFO", "diff", f"content match: {len(exact)} of {len(tb)} B blobs are byte-identical; {len(normalized)} exact normalized-F32 fingerprint matches; {ambiguous} normalized-hash candidates (INCONCLUSIVE); {len(only_a)} unmatched in A, {len(only_b)} unmatched in B")
+        if ambiguous:
+            rep.add("WARN", "diff", "normalized-hash candidates lack compatible typed normalization metadata: numeric equivalence and lossless conversion are not established")
+        if not ta or not tb:
+            rep.add("WARN", "diff", "baseline comparison incomplete: empty tensor inventory")
         rep.add("INFO", "diff", "Nonmatches are not comparable this way; quantization can change values by design. No model identity, numeric equivalence, role mapping or tampering conclusion follows.")
         for side, names in (("A", only_a), ("B", only_b)):
             for name in names[:8]:
                 rep.add("INFO", "diff", f"not matched in {side}: {name}")
-        rep.observe("baseline", "CONCERN", "Cross-format or legacy comparison is inconclusive, including empty or subset matches", scope)
+        full = bool(ta and tb) and not (only_a or only_b or ambiguous) and {fa, fb} <= {"gguf", "safetensors"}
+        rep.observe("baseline", "PASS" if full else "CONCERN",
+                    "Both nonempty inventories agree on recorded byte or typed normalized-F32 fingerprints" if full else
+                    "Cross-format or legacy comparison is inconclusive, including ambiguous, empty or subset matches", scope)
         return
     common = set(ta) & set(tb)
     only_a, only_b = sorted(set(ta) - set(tb)), sorted(set(tb) - set(ta))

@@ -183,11 +183,12 @@ class TestStructuralTampering(SAFETENSORS_BASE):
         self.assertTrue(any("tensor layout:" in m for m in msgs(rep, "CRIT")),
                         "overlapping tensor regions not caught")
 
-    def test_empty_tensor_is_informational(self):
+    def test_empty_tensor_is_inventory_warning_not_invalid_format(self):
         self.file.write_bytes(build([("model.embed_tokens.weight", "F32", [0], b"")]
                                     + honest_tensors()[1:]))
         rep = run(self.file)
-        self.assertTrue(any("is empty" in m for m in msgs(rep, "INFO")))
+        self.assertTrue(any("is empty" in m and "legal in safetensors" in m for m in msgs(rep, "WARN")))
+        self.assertEqual(msgs(rep, "CRIT"), [])
 
 
 class TestSidecarAttacks(SAFETENSORS_BASE):

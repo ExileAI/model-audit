@@ -101,6 +101,9 @@ class TestPlainTranslations(unittest.TestCase):
             "tensor entry invalid dtype or shape: weight", "baseline refused: tensor structure was not fully validated",
             "baseline comparison incomplete: missing shape metadata", "TENSOR SHAPE CHANGED: weight",
             "TENSOR CONTENT CHANGED: weight", "comparing across formats or legacy unknown formats",
+            "baseline exists: existing.json — pass --baseline-out to write a new snapshot",
+            "empty tensor: weight is empty (F32 [0]) — legal in safetensors; inventory heuristic only",
+            "normalized-hash candidates lack compatible typed normalization metadata",
         ]
         for msg in samples:
             hit = [k for k in PLAIN if msg.startswith(k) or k in msg[:40] or k in msg]
@@ -108,6 +111,14 @@ class TestPlainTranslations(unittest.TestCase):
 
 
 class TestConservativeExplanations(unittest.TestCase):
+    def test_empty_tensor_and_output_conflict_are_not_format_failures(self):
+        text = report.plain_for('WARN', 'st-tensors', 'empty tensor: weight is empty (F32 [0])')
+        self.assertIn('legal in safetensors', text)
+        self.assertNotIn('likely broken', text)
+        text = report.plain_for('WARN', 'baseline', 'baseline exists: original.json')
+        self.assertIn('preserved', text)
+        self.assertIn('does not invalidate', text)
+
     def test_unknown_dtype_is_not_a_proven_contradiction(self):
         text = report.plain_for('WARN', 'st-tensors',
             "tensor size: weight dtype 'UNKNOWN' is not a known type — its byte size cannot be verified")

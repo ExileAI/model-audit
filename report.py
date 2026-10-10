@@ -31,6 +31,8 @@ PLAIN = {
         "The file's header does not describe that weight in the required format.",
     "baseline refused": "A fingerprint baseline could not be saved because the required structural "
         "checks did not validate the tensor data. Resolve those findings before creating a baseline.",
+    "baseline exists": "The existing fingerprint file was preserved. Choose a different destination "
+        "with --baseline-out to save a new snapshot. This output conflict does not invalidate the model.",
     "baseline comparison incomplete": "A baseline is missing comparison information or contains no "
         "weights. Matching the information that remains cannot establish a complete comparison.",
     "TENSOR CONTENT CHANGED": "The recorded bytes for a weight block differ between the baselines. "
@@ -114,7 +116,9 @@ PLAIN = {
         "harmless padding from an unusual writer, or a region hidden from any structural review.",
     "trailing data": "There are bytes after the last declared weight. Nothing in the header accounts for "
         "them: appended data is invisible to anyone who only checks the weights.",
-    "is empty": "A weight block is empty — the file is likely broken or was modified.",
+    "empty tensor:": "An empty tensor is legal in safetensors. This inventory warning asks you to "
+        "check whether it belongs in this model; it does not establish corruption or tampering.",
+    "is empty": "A weight block contains no elements. Review whether that is intended.",
     "dtype is not a known type": "A weight declares a data type this tool does not recognize, so its size "
         "cannot be verified.",
     "no config.json in this directory": "There is no config beside this file. The model's claimed identity "
@@ -144,8 +148,10 @@ PLAIN = {
     "bad magic": "The file's first bytes match no known model format — it is not a GGUF or safetensors "
         "file, whatever its name says.",
     "comparing a": "The baselines use different formats or lack format information. Names, storage "
-        "types, and numerical representations may differ. Matching normalized fingerprints are only "
-        "candidates for further review; they do not establish numeric equivalence or a lossless conversion.",
+        "types, and numerical representations may differ. A complete fingerprint correspondence "
+        "does not verify tensor roles, shapes, model equivalence, or conversion history.",
+    "normalized-hash candidates": "A fingerprint matched, but the baselines lack compatible type "
+        "and normalization evidence. Review the source tensors before treating their values as equal.",
 }
 
 SEV_COLOR = {"CRIT": "#c0392b", "WARN": "#d68910", "INFO": "#5d6d7e", "OK": "#1e8449"}

@@ -155,14 +155,51 @@ class Contracts(unittest.TestCase):
         a = self.model.with_suffix('.safetensors.tensorhashes.json')
         self.audit(do_hashes=True); original = a.read_bytes()
         result = self.cli(self.model, '--tensor-hashes', '--json')
-        self.assertEqual(result.returncode, 2); json.loads(result.stdout)
+        self.assertEqual(result.returncode, 1)
+        findings = json.loads(result.stdout)
+        self.assertTrue(any(x['severity'] == 'WARN' and 'baseline exists:' in x['message'] for x in findings))
+        self.assertTrue(any('structure: PASS' in x['message'] for x in findings))
+        self.assertFalse(any('structure: NOT CHECKED' in x['message'] for x in findings))
         self.assertEqual(a.read_bytes(), original)
         b = self.d/'B.json'; self.audit(do_hashes=True, baseline_out=b)
         self.assertEqual(json.loads(a.read_text()), json.loads(b.read_text()))
         symlink = self.d/'link.json'; symlink.symlink_to(a)
-        self.assertEqual(self.cli(self.model, '--tensor-hashes','--baseline-out',symlink,'--json').returncode, 2)
+        self.assertEqual(self.cli(self.model, '--tensor-hashes','--baseline-out',symlink,'--json').returncode, 1)
         self.assertEqual(a.read_bytes(), original)
         self.assertEqual(self.cli(self.model,'--baseline-out',self.d/'x').returncode, 2)
+
+    def test_existing_baseline_keeps_unrelated_critical_and_later_checks(self):
+        destination = self.d / 'existing.json'; destination.write_text('preserved')
+        self.config.write_text(json.dumps({'chat_template': '{{ messages }}\u200b'}))
+        result = self.cli(self.model, '--tensor-hashes', '--baseline-out', destination, '--json')
+        findings = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(any(x['severity'] == 'CRIT' and x['section'] == 'template' for x in findings))
+        self.assertTrue(any('baseline exists:' in x['message'] for x in findings))
+        self.assertTrue(any('structure: PASS' in x['message'] for x in findings))
+        self.assertEqual(destination.read_text(), 'preserved')
+        with mock.patch.object(m, 'hf_check') as remote:
+            self.audit(do_hashes=True, baseline_out=destination, hf_repo='owner/repo')
+        remote.assert_called_once()
+
+    def test_only_baseline_exclusive_open_conflict_is_warning(self):
+        destination = self.d / 'new.json'
+        with mock.patch.object(m.json, 'dump', side_effect=FileExistsError('unrelated failure')):
+            with self.assertRaises(FileExistsError):
+                self.audit(do_hashes=True, baseline_out=destination)
+        self.assertFalse(destination.exists())
+        result = self.cli(self.model, '--tensor-hashes', '--baseline-out', self.d/'missing'/'x.json', '--json')
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(any('input error:' in x['message'] for x in json.loads(result.stdout)))
+
+    def test_legal_empty_tensor_warning_does_not_block_baseline(self):
+        self.model.write_bytes(build([('empty', 'F32', [0], b'')]))
+        destination = self.d / 'empty.json'
+        rep = self.audit(do_hashes=True, baseline_out=destination)
+        self.assertEqual(rep.exit_code(), 1)
+        self.assertEqual(m.evidence_rubric(rep)['domains']['structure']['status'], 'PASS')
+        self.assertTrue(destination.exists())
+        self.assertTrue(any('inventory heuristic' in msg for sev, _, msg in rep.items if sev == 'WARN'))
 
     def test_baseline_partial_write_cleanup(self):
         destination = self.d/'new.json'
@@ -256,7 +293,7 @@ class Contracts(unittest.TestCase):
         base['tensors']['x']='b'*64; b.write_text(json.dumps(base))
         result=self.cli('--diff',a,b,'--json'); self.assertEqual(result.returncode,2); json.loads(result.stdout)
         base['format']='gguf'; b.write_text(json.dumps(base))
-        result=self.cli('--diff',a,b,'--json'); self.assertEqual(result.returncode,1); json.loads(result.stdout)
+        result=self.cli('--diff',a,b,'--json'); self.assertEqual(result.returncode,0); json.loads(result.stdout)
 
     def test_terminal_controls_escaped_json_preserved(self):
         rep=m.Report(); rep.add('WARN','template','payload\x1b[31m\nnext')
@@ -297,7 +334,215 @@ class Matching(unittest.TestCase):
                 b.write_text(json.dumps(variant)); rep=m.Report(); m.diff_baselines(a,b,rep)
                 self.assertEqual(m.evidence_rubric(rep)['domains']['baseline']['status'],'CONCERN')
             for path in (a,b): path.write_text(json.dumps(dict(original,format='nonsense')))
-            rep=m.Report(); m.diff_baselines(a,b,rep); self.assertEqual(rep.exit_code(),1)
+            rep=m.Report(); m.diff_baselines(a,b,rep); self.assertEqual(rep.exit_code(),0)
+
+
+class TypedFingerprints(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def baseline(self, name, dtype, raw, fmt, byte_order='little'):
+        path = self.d / name; path.write_bytes(raw)
+        target = self.d / (name + '.json')
+        unit = m.ST_DTYPE_SIZE[dtype]
+        tensor = m.STTensor(name, [len(raw) // unit], dtype, 0, len(raw))
+        m.write_baseline([tensor], path, H(raw), fmt, m.Report(), target, byte_order)
+        return m.read_baseline(target)
+
+    def compare(self, a, b):
+        pa, pb = self.d/'A.json', self.d/'B.json'
+        pa.write_text(json.dumps(a)); pb.write_text(json.dumps(b))
+        rep = m.Report(); m.diff_baselines(pa, pb, rep)
+        return rep
+
+    def text(self, rep):
+        return '\n'.join(msg for _, _, msg in rep.items)
+
+    def status(self, rep):
+        return m.evidence_rubric(rep)['domains']['baseline']['status']
+
+    def pair(self):
+        a = self.baseline('source', 'BF16', struct.pack('<H', 0x3f80), 'safetensors')
+        b = self.baseline('converted', 'F32', struct.pack('<f', 1.0), 'gguf')
+        return a, b
+
+    def test_generated_bf16_f32_pair_has_exact_typed_fingerprints(self):
+        a, b = self.pair()
+        self.assertEqual(a['values']['source'], H(struct.pack('<I', 0x3f800000)))
+        self.assertEqual(b['values']['converted'], b['tensors']['converted'])
+        for left, right in ((a,b), (b,a)):
+            rep = self.compare(left, right)
+            self.assertIn('1 exact normalized-F32 fingerprint matches', self.text(rep))
+            self.assertIn('0 normalized-hash candidates', self.text(rep))
+            self.assertEqual(rep.exit_code(), 0)
+            self.assertEqual(self.status(rep), 'PASS')
+            self.assertNotIn('identical values', self.text(rep))
+            row = m.evidence_rubric(rep)['domains']['baseline']
+            self.assertIn('shapes', row['scope'])
+            self.assertIn('NOT VERIFIED', row['scope'])
+            self.assertNotIn('shapes', row['reason'])
+
+    def test_known_format_bf16_vs_i32_same_bits_remains_inconclusive(self):
+        a, _ = self.pair()
+        b = self.baseline('integer', 'I32', struct.pack('<i', 1065353216), 'gguf')
+        self.assertEqual(a['values']['source'], b['tensors']['integer'])
+        self.assertNotEqual(1.0, 1065353216)
+        for left, right in ((a,b), (b,a)):
+            rep = self.compare(left, right)
+            self.assertIn('0 exact normalized-F32 fingerprint matches', self.text(rep))
+            self.assertIn('1 normalized-hash candidates (INCONCLUSIVE)', self.text(rep))
+            self.assertEqual(rep.exit_code(), 1)
+            self.assertEqual(self.status(rep), 'CONCERN')
+
+    def test_legacy_f32_omission_is_not_type_evidence(self):
+        a, b = self.pair()
+        for base in (a, b): base.pop('value_metadata')
+        b['values'] = {}
+        rep = self.compare(a, b)
+        self.assertIn('1 normalized-hash candidates (INCONCLUSIVE)', self.text(rep))
+        self.assertEqual(self.status(rep), 'CONCERN')
+
+    def test_wrong_or_missing_interpretation_never_promotes_candidate(self):
+        a, b = self.pair()
+        for key, value in (('dtype','I32'), ('dtype','F16'), ('byte_order','big'),
+                           ('normalization','unknown')):
+            with self.subTest(key=key, value=value):
+                variant = json.loads(json.dumps(b))
+                variant['value_metadata']['converted'][key] = value
+                rep = self.compare(a, variant)
+                self.assertIn('0 exact normalized-F32 fingerprint matches', self.text(rep))
+                self.assertEqual(self.status(rep), 'CONCERN')
+
+    def test_malformed_metadata_and_f32_identity_contradictions_rejected(self):
+        a, b = self.pair()
+        bad = [None, [], {'absent': b['value_metadata']['converted']}, {'converted': {}},
+               {'converted': dict(b['value_metadata']['converted'], dtype=32)}]
+        for metadata in bad:
+            with self.subTest(metadata=metadata), self.assertRaises(ValueError):
+                self.compare(a, dict(b, value_metadata=metadata))
+        b['values']['converted'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'must equal its byte hash'):
+            self.compare(a, b)
+
+    def test_typed_matches_precede_ambiguous_candidates_and_consume_once(self):
+        a, b = self.pair()
+        # This untyped normalized hash sorts first, but must not steal the source.
+        b['tensors']['aaa-legacy'] = H(b'other raw bytes')
+        b['values']['aaa-legacy'] = a['values']['source']
+        exact, pairs, only_a, only_b = m.match_blobs(a, b)
+        self.assertEqual(exact, [])
+        self.assertEqual(pairs, [('source', 'converted')])
+        self.assertEqual(only_a, [])
+        self.assertEqual(only_b, ['aaa-legacy'])
+
+    def test_exact_matches_keep_priority_over_typed_matches(self):
+        a, b = self.pair()
+        b['tensors']['raw-copy'] = a['tensors']['source']
+        exact, pairs, only_a, only_b = m.match_blobs(a, b)
+        self.assertEqual(exact, [('source', 'raw-copy')])
+        self.assertEqual(pairs, [])
+        self.assertEqual(only_b, ['converted'])
+
+    def test_cross_format_subset_reports_both_sides_and_cannot_pass(self):
+        a, b = self.pair()
+        a['tensors']['extra-source'] = H(b'extra source')
+        rep = self.compare(a, b)
+        self.assertIn('not matched in A: extra-source', self.text(rep))
+        self.assertEqual(self.status(rep), 'CONCERN')
+        rep = self.compare(b, a)
+        self.assertIn('not matched in B: extra-source', self.text(rep))
+        self.assertEqual(self.status(rep), 'CONCERN')
+
+    def test_empty_inventories_never_pass_for_any_format_pair(self):
+        for fa, fb in (('safetensors','gguf'), ('safetensors','safetensors'), (None,None)):
+            for ta, tb in (({},{}), ({'a': H(b'a')},{}), ({},{'b': H(b'b')})):
+                with self.subTest(formats=(fa,fb), tensors=(ta,tb)):
+                    a, b = dict(tensors=ta), dict(tensors=tb)
+                    if fa: a['format'] = fa
+                    if fb: b['format'] = fb
+                    rep = self.compare(a, b)
+                    self.assertNotEqual(self.status(rep), 'PASS')
+                    self.assertIn('empty tensor', self.text(rep))
+                    self.assertGreater(rep.exit_code(), 0)
+
+    def test_cross_format_bytes_do_not_claim_shape_or_dtype_equivalence(self):
+        a = dict(format='safetensors', tensors={'a':H(b'bytes')}, shapes={'a':[2,3]})
+        b = dict(format='gguf', tensors={'b':H(b'bytes')}, shapes={'b':[3,2]})
+        rep = self.compare(a,b)
+        self.assertEqual(self.status(rep), 'PASS')
+        self.assertIn('1 of 1 B blobs are byte-identical', self.text(rep))
+        self.assertNotIn('shapes', m.evidence_rubric(rep)['domains']['baseline']['reason'])
+
+    def test_generic_limits_and_nonmatches_are_info_without_candidate_warning(self):
+        a = dict(format='safetensors', tensors={'a':H(b'a')})
+        for fmt in ('gguf', 'unknown'):
+            rep = self.compare(a, dict(format=fmt, tensors={'b':H(b'b')}))
+            self.assertEqual(rep.exit_code(), 0)
+            self.assertEqual(self.status(rep), 'CONCERN')
+            self.assertTrue(all(sev == 'INFO' for sev, _, _ in rep.items))
+
+    def test_bf16_all_bit_patterns_match_independent_shift_with_chunk_carry(self):
+        raw = struct.pack('<65536H', *range(65536))
+        expected = b''.join(struct.pack('<I', value << 16) for value in range(65536))
+        path = self.d/'bits'; path.write_bytes(raw)
+        for chunk in (3, 5, m.CHUNK):
+            with self.subTest(chunk=chunk), mock.patch.object(m, 'CHUNK', chunk):
+                self.assertEqual(m.tensor_fingerprints(path, 0, len(raw), 'BF16'), (H(raw), H(expected)))
+
+    def test_f16_nan_normalization_has_no_bit_preserving_metadata(self):
+        a = self.baseline('f16', 'F16', struct.pack('<H', 0x7c01), 'safetensors')
+        self.assertIn('f16', a['values'])
+        self.assertNotIn('f16', a['value_metadata'])
+        self.assertIsNone(m.normalized_fingerprint(a, 'f16'))
+
+    def test_big_or_unknown_endian_gguf_does_not_record_value_evidence(self):
+        for order in ('big', None):
+            a = self.baseline(str(order), 'F32', struct.pack('>f', 1.0), 'gguf', order)
+            self.assertEqual(a['values'], {})
+            self.assertEqual(a['value_metadata'], {})
+            self.assertEqual(a['tensors'][str(order)], H(struct.pack('>f', 1.0)))
+
+    @unittest.skipIf(m.gguf is None, 'optional gguf dependency not installed')
+    def test_real_gguf_reader_supplies_observed_endian_evidence(self):
+        import numpy as np
+        for endian, order in ((m.gguf.GGUFEndian.LITTLE, '<'), (m.gguf.GGUFEndian.BIG, '>')):
+            with self.subTest(order=order):
+                path = self.d / (endian.name + '.gguf')
+                writer = m.gguf.GGUFWriter(path, 'clip', endianess=endian)
+                writer.add_tensor('weight', np.array([1.0, -0.0], dtype=np.float32))
+                writer.write_header_to_file(); writer.write_kv_data_to_file()
+                writer.write_tensors_to_file(); writer.close()
+                target = self.d / (endian.name + '.json')
+                m.audit(path, m.Report(), do_hashes=True, baseline_out=target)
+                base = m.read_baseline(target)
+                self.assertEqual(base['tensors']['weight'], H(struct.pack(order+'2f', 1.0, -0.0)))
+                if endian == m.gguf.GGUFEndian.LITTLE:
+                    self.assertEqual(m.normalized_fingerprint(base, 'weight'), H(struct.pack('<2f', 1.0, -0.0)))
+                else:
+                    self.assertEqual(base['values'], {})
+                    self.assertEqual(base['value_metadata'], {})
+
+    @unittest.skipIf(m.gguf is None, 'optional gguf dependency not installed')
+    def test_real_safetensors_to_gguf_bf16_f32_diff(self):
+        import numpy as np
+        source = self.d / 'source.safetensors'
+        source.write_bytes(build([('norm', 'BF16', [2], struct.pack('<2H', 0x3f80, 0x4000))]))
+        target = self.d / 'target.gguf'
+        writer = m.gguf.GGUFWriter(target, 'clip')
+        writer.add_tensor('converted_norm', np.array([1.0, 2.0], dtype=np.float32))
+        writer.write_header_to_file(); writer.write_kv_data_to_file()
+        writer.write_tensors_to_file(); writer.close()
+        a, b = self.d/'source.json', self.d/'target.json'
+        m.audit(source, m.Report(), do_hashes=True, baseline_out=a)
+        m.audit(target, m.Report(), do_hashes=True, baseline_out=b)
+        rep = self.compare(m.read_baseline(a), m.read_baseline(b))
+        self.assertIn('1 exact normalized-F32 fingerprint matches', self.text(rep))
+        self.assertEqual(self.status(rep), 'PASS')
+        self.assertEqual(rep.exit_code(), 0)
 
 
 if __name__ == '__main__':

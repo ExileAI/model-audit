@@ -37,10 +37,16 @@ python3 model_audit.py model.gguf --tensor-hashes
   A mismatch under the file's own name is a red flag.
 - The second writes `model.gguf.tensorhashes.json` — the per-weight fingerprint.
   **Keep that original reference.** Existing destinations are refused rather than
-  overwritten. This fingerprints the audited bytes; it does not prove the weights safe.
+  overwritten, with WARN and exit 1 (exit 2 if another finding is CRIT). Choose a
+  new destination with `--baseline-out`. This fingerprints the audited bytes; it
+  does not prove the weights safe.
 
-Read the report. CRIT findings → do not load the model, full stop. Warnings → read
-each explanation; tool-calling models trip "file I/O"-style patterns legitimately.
+Read the report. `CRITICAL FINDINGS: REVIEW BEFORE LOADING` means investigate before
+loading. `WARNINGS: REVIEW THE DETAILS` means read each explanation; tool-calling
+models trip "file I/O"-style patterns legitimately. `NO RED FLAGS IN COMPLETED CHECKS`
+does not cover anything absent or uninspected and does not promise safety.
+An empty safetensors tensor gets an inventory-heuristic WARN but remains
+structurally legal and baseline-eligible.
 
 ### 2b. If the model is safetensors, hash the sidecars too
 
@@ -66,14 +72,32 @@ python3 model_audit.py model-Q8_0.gguf   --tensor-hashes
 python3 model_audit.py --diff model.safetensors.tensorhashes.json model-Q8_0.gguf.tensorhashes.json
 ```
 
-- Byte matches and normalized-hash candidates are counted separately, consuming each
-  source and destination tensor at most once. Both unmatched sides are reported. The
-  current baseline lacks dtype and byte-order evidence, so normalized matches are
-  inconclusive; even a complete fingerprint match does not prove a lossless conversion
-  or correct tensor-role mapping.
-- A **quantized** build matches only on the tensors quantization leaves untouched (usually
-  the norms). The rest is reported as "not comparable this way" — quantization transforms
-  values by design, so that is not a red flag.
+- Matching proceeds by bytes first, supported typed normalized fingerprints second,
+  then ambiguous candidates. The counts stay separate; each source and destination
+  tensor is consumed at most once. Both unmatched sides have complete counts and
+  up to eight names each.
+- New baselines preserve `tensors`, `values`, and `shapes` and add optional per-tensor
+  `value_metadata` (`dtype`, `byte_order: "little"`, `normalization: "f32-le-bits-v1"`).
+  Little-endian BF16/F32 tensors have explicit normalized `values` hashes,
+  including F32. Only value-to-value matches with supported metadata on both sides
+  establish an **exact normalized-F32-fingerprint match**. Big- or unknown-endian GGUF
+  tensors get byte hashes only, without value claims.
+- F16's existing struct-based normalized hash is only a legacy/inconclusive
+  candidate because it does not preserve NaN payload bits. Baseline validation
+  rejects typed F32 metadata whose byte and normalized hashes contradict each other.
+- BF16 widening to F32 is mathematically exact. Matching fingerprints establish
+  consistency of the normalized bitstream, not historical lineage or a lossless
+  whole-model conversion. A known container format cannot prove a raw hash's dtype:
+  an old BF16 value hash can match I32 raw bits. Legacy/ambiguous candidates remain
+  INCONCLUSIVE and get WARN findings.
+- Cross-format PASS requires nonempty, full byte/typed-normalized correspondence.
+  It does not check shapes, semantic roles, numerical/model equivalence, or history.
+  Unknown formats, ambiguous candidates, empty inventories, and partial matches
+  remain CONCERN. Empty inventories receive WARN; general comparison limits are INFO.
+- A **quantized** build typically matches on tensors left unquantized (usually the
+  norms). The rest is reported as "not comparable this way" — quantization transforms
+  values by design, so nonmatches are INFO and a comparison CONCERN, not evidence
+  of tampering. A CONCERN may therefore accompany exit 0; read the rubric too.
 - Names differ between formats (`blk.0.attn_q` vs `model.layers.0.self_attn.q_proj`) and so
   can dimension order; the comparison matches by content for exactly that reason.
 

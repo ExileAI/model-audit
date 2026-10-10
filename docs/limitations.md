@@ -12,7 +12,7 @@ eliminate it.
 | `--revision` pin | A full resolved commit identifies a snapshot; symbolic refs remain mutable | Anything about commits *before* it; a repo can publish poison at v1 and swap at v2 |
 | Template scan | The chat instructions carried inside the file contain no (detected) hostile code, hidden chars, or exfiltration patterns | That the scanner's pattern list is complete. Novel attacks evading these signatures will pass |
 | Metadata checks | Internal labels agree with filename claims; provenance KVs exist | That the labels are truthful — an uploader can set `general.name` to anything |
-| Tensor census | Implemented inventory checks completed; legal empty tensors remain valid | That tensor *values* are what they should be |
+| Tensor census | Implemented inventory checks completed; legal empty safetensors tensors receive an inventory-heuristic WARN but remain structurally valid and baseline-eligible | That tensor *values* are what they should be |
 | safetensors header checks | The header parses, its declared lengths fit the file, each tensor's dtype × shape equals its declared byte span, spans never overlap, and no bytes are unaccounted for (gap or trailing data) | That the weights are what the header says — the header is text the uploader wrote. A perfectly self-consistent file can be a perfectly tampered one |
 | Template sidecar scan (safetensors) | The templates shipped next to the weights (`chat_template.jinja`, every `chat_template` entry in `tokenizer_config.json`) contain no (detected) hostile code, and two disagreeing sources are flagged | That those are the templates that will actually be used — your app may supply its own — or that the pattern list is complete |
 | `*.index.json` check | The shard description matches the shard it describes (weights present, `total_size` right) | That the other shards in the set, or the tensors' contents, are honest |
@@ -51,13 +51,31 @@ eliminate it.
    re-check them on every re-download. A clean weights hash says nothing about the
    text your model reads its instructions from.
 
-6. **Prove model equivalence or conversion history with anonymous hashes.**
-   The existing baseline records bytes, shapes, and optional normalized hashes,
-   not dtype, byte order, or semantic tensor roles. Cross-format comparison counts
-   each tensor once and reports byte matches separately from inconclusive
-   normalized-hash candidates. Even full correspondence does not prove numerical
-   equivalence, a correct conversion, or historical provenance. Quantized values
-   usually do not match; that alone is not evidence of tampering.
+6. **Prove model equivalence or conversion history with fingerprints.**
+   Baselines preserve the `tensors`, `values`, and `shapes` maps and add optional
+   per-tensor `value_metadata`: `dtype`, `byte_order: "little"`, and
+   `normalization: "f32-le-bits-v1"`. Only little-endian BF16/F32 value-to-value
+   digests with supported metadata on both sides establish an **exact
+   normalized-F32-fingerprint match**. F32 has an explicit `values` entry too.
+   Big- or unknown-endian GGUF tensors get byte hashes only, with no value claims.
+   F16's existing struct-based value hash remains only a legacy/inconclusive
+   candidate: its NaN payload conversion is not bit-preserving. Typed F32 metadata
+   with contradictory byte and normalized hashes is rejected by baseline validation.
+
+   BF16 widening to F32 is mathematically exact. A normalized fingerprint match
+   establishes consistency of that canonical normalized bitstream, not historical
+   lineage or a lossless whole-model conversion. Known container formats do not
+   prove the dtype of a raw hash: a legacy BF16 normalized hash can match I32 raw
+   bits. Legacy or otherwise ambiguous candidates remain INCONCLUSIVE.
+
+   Cross-format comparison matches bytes first, supported typed normalized hashes
+   second, and ambiguous candidates last, consuming each tensor once and listing
+   both unmatched sides (complete counts and up to eight names each). A scoped PASS requires nonempty, full byte/typed-normalized
+   correspondence. It does not check shapes, semantic tensor roles, numerical/model
+   equivalence, or history. Unknown formats, ambiguous candidates, empty inventories,
+   and partial correspondence stay CONCERN. Generic comparison limits are INFO;
+   actual ambiguous candidates and empty inventories are WARN. Quantized nonmatches
+   are INFO and remain a comparison CONCERN, not evidence of tampering.
 
 7. **Guarantee one immutable snapshot or bounded hostile-input resource use.**
    Audit stable completed files. Exact-range hashing rejects short reads, but
@@ -81,10 +99,14 @@ The gold standard, in order:
 
 ## Practical guidance from verdicts
 
-- `DO NOT RUN` — a critical signal, invalid input, or hard failure needs resolution.
-  This is a conservative action recommendation, not proof of malicious intent.
-- `USE WITH AWARENESS` — read the specific warnings. Tool-calling models trip
-  "file I/O" style patterns legitimately; the explanation text tells you when.
-- `NO RED FLAGS` — completed checks found no known suspicious patterns. Read the
-  coverage/rubric for anything absent or uninspected. This proves neither honesty
-  nor safety. Preserve a baseline if comparison matters.
+- `CRITICAL FINDINGS: REVIEW BEFORE LOADING` — a critical signal, invalid input,
+  or hard failure needs resolution. This is not proof of malicious intent.
+- `WARNINGS: REVIEW THE DETAILS` — read the specific warnings. Tool-calling models
+  trip "file I/O" style patterns legitimately; the explanation text tells you when.
+- `NO RED FLAGS IN COMPLETED CHECKS` — completed checks found no known suspicious
+  patterns. Read the coverage/rubric for anything absent or uninspected. This proves
+  neither honesty nor safety. Preserve a baseline if comparison matters.
+
+Baseline creation refuses an existing destination with WARN and exit 1 (or exit 2
+if another finding is CRIT). Nothing is overwritten; choose a new `--baseline-out`
+destination and retain the original reference. Creating a baseline is not a comparison.
