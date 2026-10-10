@@ -193,10 +193,10 @@ original reference.
 banners and explanations are historical samples, not the current wording or
 evidence contract described above (click to open):
 
-- [`report-01-clean-gemma-12b-obliterated`](examples/report-01-clean-gemma-12b-obliterated.html) — **NO RED FLAGS**
-- [`report-02-warn-mxfp4-anonymous`](examples/report-02-warn-mxfp4-anonymous.html) — **USE WITH AWARENESS**
+- [`report-01-clean-gemma-12b-obliterated`](examples/report-01-clean-gemma-12b-obliterated.html) — **NO RED FLAGS IN COMPLETED CHECKS**
+- [`report-02-warn-mxfp4-anonymous`](examples/report-02-warn-mxfp4-anonymous.html) — **WARNINGS: REVIEW THE DETAILS**
 - [`report-03-aeon-pair-two-uploaders`](examples/report-03-aeon-pair-two-uploaders.html) — two uploaders, one "AEON" lineage
-- [`report-04-do-not-run-template-swap`](examples/report-04-do-not-run-template-swap.html) — **DO NOT RUN**, produced by swapping the
+- [`report-04-do-not-run-template-swap`](examples/report-04-do-not-run-template-swap.html) — **CRITICAL FINDINGS: REVIEW BEFORE LOADING**, produced by swapping the
   chat template for a hostile one. The weights were unchanged in this example;
   the sample shows what a single replaced string does to the verdict, without
   establishing that the weights are safe.
@@ -277,7 +277,7 @@ they downloaded is what you made.
    able to explain every warning in your own file.
 2. **Never swap a template after quantizing.** The chat template is baked into the
    GGUF; editing it afterwards with a hex editor or a "template fixer" leaves exactly
-   the fingerprint our DO-NOT-RUN sample shows
+   the fingerprint our template-swap sample shows
    ([report-04](examples/report-04-do-not-run-template-swap.html)) — a verdict flip
    your users will see. If the template needs changing, re-convert from source.
 3. **Keep sidecars in sync.** If you ship `chat_template.jinja`, `tokenizer_config.json`,
@@ -322,6 +322,7 @@ Newest first. Each entry is a commit on `master` (`git show <sha>` for the diff)
 
 | commit | change |
 |---|---|
+| `3818d71` | **v0.5.0** — Merge PR #1 (@am423 / mr-r0b0t): evidence rubric under the banners, typed baselines (dtype/byte-order/normalization metadata → exact normalized-F32 claims for fresh typed pairs), one-use tensor matching, stricter safetensors/JSON validation, baseline-conflict WARN + `--baseline-out`, unique report run dirs, `tests/test_cli.py`; banner rewording; Python 3.10 for full install (`gguf` 0.19.0 requirement) |
 | `cc17289` | **v0.4.0** — sample reports committed in `examples/`; `--version` on both scripts; `docs/reading-a-report.md` |
 | `7184447` | gitignore: ignore `*.safetensors` and `*.safetensors.index.json` |
 | `81e4569` | report: show the audited format, fix dead provenance rows, drop internal jargon |

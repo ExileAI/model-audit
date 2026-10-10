@@ -34,6 +34,11 @@
       },
       {
         "severity": "INFO",
+        "section": "template",
+        "message": "template sidecar: GGUF embedded tokenizer.chat_template (17,466 bytes)"
+      },
+      {
+        "severity": "INFO",
         "section": "tensors",
         "message": "667 tensors total"
       },
@@ -47,6 +52,35 @@
         "section": "sidecar",
         "message": "config file present (card-vs-file mismatch possible): config.json"
       }
-    ]
+    ],
+    "rubric": {
+      "domains": {
+        "structure": {
+          "status": "PASS",
+          "reason": "GGUF reader and implemented tensor checks only",
+          "scope": "GGUF structural checks, not all format invariants"
+        },
+        "templates": {
+          "status": "PASS",
+          "reason": "All inspected text passed implemented signatures",
+          "scope": "GGUF embedded tokenizer.chat_template (signature scan only)"
+        },
+        "provenance": {
+          "status": "NOT CHECKED",
+          "reason": "Not requested or not inspected",
+          "scope": "provenance"
+        },
+        "baseline": {
+          "status": "NOT CHECKED",
+          "reason": "Not requested or not inspected",
+          "scope": "baseline"
+        }
+      },
+      "coverage": {
+        "status": "COMPLETE",
+        "reason": "Requested applicable checks completed; no safety guarantee",
+        "scope": "Only requested, implemented checks; optional unrequested checks are excluded"
+      }
+    }
   }
 ]

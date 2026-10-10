@@ -326,7 +326,7 @@ tr.ok td:first-child { border-left: 4px solid #1e8449; }
 .coverage-scope { color: #555; }
 """
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 def _generate(models, outdir):
     """Return the completed HTML path and worst audit severity (0, 1, or 2)."""

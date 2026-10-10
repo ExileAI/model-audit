@@ -31,7 +31,7 @@ try:
 except ImportError:  # safetensors auditing needs no third-party packages at all
     gguf = None
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 # ---------------- findings collector ----------------
 class Report:
