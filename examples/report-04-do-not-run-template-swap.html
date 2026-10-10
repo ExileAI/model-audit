@@ -28,35 +28,70 @@ tr.ok td:first-child { border-left: 4px solid #1e8449; }
 .sumnum { display: block; font-size: 1.8em; font-weight: 800; }
 .sumitem { color: #555; font-size: 0.85em; }
 .idcard td { font-size: 0.95em; }
+.rubric { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+.rubric td, .rubric th { text-align: left; vertical-align: top; padding: 8px;
+                       border: 1px solid #ddd; overflow-wrap: anywhere; }
+.rubric thead { background: #f4f6f7; }
+.coverage { font-size: 0.92em; line-height: 1.5; }
+.coverage-scope { color: #555; }
 </style></head><body>
 <h1>🛡️ Model Audit Report</h1>
-<p class="foot" style="border:none;margin-top:0">1 file audited · generated 2026-10-08 16:05 by model-audit v0.4.0</p>
+<p class="foot" style="border:none;margin-top:0">1 file audited · generated 2026-10-10 13:24:04 UTC by model-audit v0.5.0</p>
 
 
     <section class="fileblock">
       <h2>Gemma-4-12B-OBLITERATED-demo-tampered-template.gguf</h2>
       <div class="verdict" style="border-color:#c0392b">
-        <div class="vtitle" style="color:#c0392b">DO NOT RUN THIS FILE</div>
-        <div class="vtext">Critical findings mean this file is unsafe or untrustworthy as-is.</div>
-        <div class="vaction"><b>▶ What to do: delete or quarantine this file. If you want this model, get it from a source that documents its quantization (or quantize it yourself), then re-audit.</b></div>
+        <div class="vtitle" style="color:#c0392b">CRITICAL FINDINGS: REVIEW BEFORE LOADING</div>
+        <div class="vtext">A check found a critical problem or the audit could not complete. The details establish the issue, not the intent behind it.</div>
+        <div class="vaction"><b>▶ What to do: review the critical findings before loading this file. Resolve unreadable files, structural problems, or suspicious instructions and re-audit.</b></div>
       </div>
       
       <table class="meta idcard">
         <tr><td>Format</td><td>gguf</td></tr>
         <tr><td>Model type</td><td>gemma4 · quant Q4_K_M</td></tr>
         
-        <tr><td>Chat template</td><td style="color:#c0392b;font-weight:600">❌ HOSTILE PATTERNS FOUND</td></tr>
-        
+        <tr><td>Chat template</td><td>CONCERN</td></tr>
+        <tr><td>Template source</td><td class="mono">GGUF embedded tokenizer.chat_template</td></tr>
       </table>
       <table class="meta">
         <tr><td>SHA-256 fingerprint</td><td class="mono">74f8e704a61f3897c868c9bc0712a61f940377ae4c324ae53b2a94bf7f6ad506</td></tr>
         <tr><td>Size</td><td>7,381,365,376 bytes</td></tr>
       </table>
+      
+      <h3>Evidence coverage</h3>
+      <p class="coverage"><b>Requested coverage: COMPLETE</b><br>
+        Requested applicable checks completed; no safety guarantee<br>
+        <span class="coverage-scope">Scope: Only requested, implemented checks; optional unrequested checks are excluded</span></p>
+      <table class="rubric">
+        <thead><tr><th>Domain</th><th>Status</th><th>Reason</th><th>Scope</th></tr></thead>
+        <tbody><tr>
+          <th scope="row">Structure</th>
+          <td>PASS</td>
+          <td>GGUF reader and implemented tensor checks only</td>
+          <td>GGUF structural checks, not all format invariants</td>
+        </tr><tr>
+          <th scope="row">Templates</th>
+          <td>CONCERN</td>
+          <td>Signature findings require review</td>
+          <td>GGUF embedded tokenizer.chat_template (signature scan only)</td>
+        </tr><tr>
+          <th scope="row">Provenance</th>
+          <td>NOT CHECKED</td>
+          <td>Not requested or not inspected</td>
+          <td>provenance</td>
+        </tr><tr>
+          <th scope="row">Baseline</th>
+          <td>NOT CHECKED</td>
+          <td>Not requested or not inspected</td>
+          <td>baseline</td>
+        </tr></tbody>
+      </table>
       <table class="findings">
         <tr class="crit">
           <td><span class="badge" style="background:#c0392b">CRITICAL</span></td>
           <td><span class="sec">Chat template</span>
-              <div class="msg">5 zero-width/invisible chars embedded in template (0x200b, 0x200c, 0x200d, 0x2060)</div><p class="plain">Invisible characters are hidden in the template. These can smuggle instructions past a human reviewer or alter model behavior without any visible change.</p></td>
+              <div class="msg">GGUF embedded tokenizer.chat_template: 5 zero-width/invisible chars embedded in template (0x200b, 0x200c, 0x200d, 0x2060)</div><p class="plain">Invisible characters are hidden in the template. These can smuggle instructions past a human reviewer or alter model behavior without any visible change.</p></td>
         </tr>
         <tr class="info">
           <td><span class="badge" style="background:#5d6d7e">Info</span></td>
@@ -67,6 +102,11 @@ tr.ok td:first-child { border-left: 4px solid #1e8449; }
           <td><span class="badge" style="background:#5d6d7e">Info</span></td>
           <td><span class="sec">Metadata</span>
               <div class="msg">quant=Q4_K_M</div></td>
+        </tr>
+        <tr class="info">
+          <td><span class="badge" style="background:#5d6d7e">Info</span></td>
+          <td><span class="sec">Chat template</span>
+              <div class="msg">template sidecar: GGUF embedded tokenizer.chat_template (625 bytes)</div></td>
         </tr>
         <tr class="info">
           <td><span class="badge" style="background:#5d6d7e">Info</span></td>
@@ -84,9 +124,10 @@ tr.ok td:first-child { border-left: 4px solid #1e8449; }
               <div class="msg">config file present (card-vs-file mismatch possible): config.json</div></td>
         </tr></table>
     </section>
-<p class="foot"><b>What this report can and cannot tell you:</b> these checks read the file's
-metadata, chat template, and structure. They prove what the file <i>claims</i> to be and whether
-anything hostile hides in the instructions it carries. They cannot prove the mathematical weights
-themselves are free of subtle tampering — for that, generate per-tensor fingerprints
-(<code>--tensor-hashes</code>) and compare against a build you trust.</p>
+<p class="foot"><b>What this report can and cannot tell you:</b> these checks inspect available
+metadata, template text, and file structure within the scope shown above. Pattern matches are
+review signals; their presence does not prove hostile intent, and their absence does not exclude
+unknown attacks. Metadata claims are self-reported. Hash matches establish consistency with a
+particular reference, not trust in its author or safety of the mathematical weights. Baseline
+comparisons must use an appropriate trusted reference and cannot establish that weights are benign.</p>
 </body></html>

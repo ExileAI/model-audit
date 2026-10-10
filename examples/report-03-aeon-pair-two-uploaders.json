@@ -34,6 +34,11 @@
       },
       {
         "severity": "INFO",
+        "section": "template",
+        "message": "template sidecar: GGUF embedded tokenizer.chat_template (8,952 bytes)"
+      },
+      {
+        "severity": "INFO",
         "section": "tensors",
         "message": "866 tensors total"
       },
@@ -42,7 +47,36 @@
         "section": "tensors",
         "message": "83 tensors sit at common abliteration edit sites (ffn_down/ffn_out/attn_o, or down_proj/o_proj in HF naming) \u2014 diff these against a trusted build"
       }
-    ]
+    ],
+    "rubric": {
+      "domains": {
+        "structure": {
+          "status": "PASS",
+          "reason": "GGUF reader and implemented tensor checks only",
+          "scope": "GGUF structural checks, not all format invariants"
+        },
+        "templates": {
+          "status": "PASS",
+          "reason": "All inspected text passed implemented signatures",
+          "scope": "GGUF embedded tokenizer.chat_template (signature scan only)"
+        },
+        "provenance": {
+          "status": "NOT CHECKED",
+          "reason": "Not requested or not inspected",
+          "scope": "provenance"
+        },
+        "baseline": {
+          "status": "NOT CHECKED",
+          "reason": "Not requested or not inspected",
+          "scope": "baseline"
+        }
+      },
+      "coverage": {
+        "status": "COMPLETE",
+        "reason": "Requested applicable checks completed; no safety guarantee",
+        "scope": "Only requested, implemented checks; optional unrequested checks are excluded"
+      }
+    }
   },
   {
     "file": "Abiray/Qwen3.6-27B-AEON-Ultimate-Uncensored-GGUF/qwen3.6-27b-uncensored-q4_k_s.gguf",
@@ -79,6 +113,11 @@
       },
       {
         "severity": "INFO",
+        "section": "template",
+        "message": "template sidecar: GGUF embedded tokenizer.chat_template (194 bytes)"
+      },
+      {
+        "severity": "INFO",
         "section": "tensors",
         "message": "851 tensors total"
       },
@@ -92,6 +131,35 @@
         "section": "sidecar",
         "message": "config file present (card-vs-file mismatch possible): tokenizer_config.json"
       }
-    ]
+    ],
+    "rubric": {
+      "domains": {
+        "structure": {
+          "status": "PASS",
+          "reason": "GGUF reader and implemented tensor checks only",
+          "scope": "GGUF structural checks, not all format invariants"
+        },
+        "templates": {
+          "status": "PASS",
+          "reason": "All inspected text passed implemented signatures",
+          "scope": "GGUF embedded tokenizer.chat_template (signature scan only)"
+        },
+        "provenance": {
+          "status": "NOT CHECKED",
+          "reason": "Not requested or not inspected",
+          "scope": "provenance"
+        },
+        "baseline": {
+          "status": "NOT CHECKED",
+          "reason": "Not requested or not inspected",
+          "scope": "baseline"
+        }
+      },
+      "coverage": {
+        "status": "COMPLETE",
+        "reason": "Requested applicable checks completed; no safety guarantee",
+        "scope": "Only requested, implemented checks; optional unrequested checks are excluded"
+      }
+    }
   }
 ]
