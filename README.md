@@ -317,6 +317,19 @@ of a promise.
 - **Remote-only audit** — audit a Hugging Face repo's file list and hashes straight from the
   API, without downloading multi-GB files.
 
+## Contributors & acknowledgments
+
+- **@rwkeyes** — first external bug report (#2): the `file_type` table off-by-one
+  affecting every IQ-quant file, with a measured sweep, the canonical enum
+  cross-check, and a minimal repro harness. The enum-derived table, the
+  filename-token fix, and the enum-sync guard test all trace to that report.
+- **@am423 (mr-r0b0t)** — PR #1: the evidence rubric, typed normalization
+  metadata, one-use tensor matching, stricter safetensors/JSON validation, and
+  the CLI/rubric test suite.
+
+External reports and reviews make this tool more trustworthy than we can make it
+alone — false positives and missed cases both get caught faster in the open.
+
 ## Changelog
 Newest first. Each entry is a commit on `master` (`git show <sha>` for the diff).
 
