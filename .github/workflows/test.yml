@@ -23,6 +23,8 @@ jobs:
         run: python3 tests/test_report.py
       - name: Run CLI and rubric regression tests
         run: python3 tests/test_cli.py
+      - name: Run filetype table regression tests (issue #2)
+        run: python3 tests/test_filetype.py
       - name: Smoke-test CLI help
         run: |
           python3 model_audit.py --help > /dev/null

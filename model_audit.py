@@ -287,24 +287,39 @@ def check_meta(md, path, rep):
     if arch == "?":
         rep.add("WARN", "meta", "no general.architecture KV — nonstandard or stripped build")
     # quant type vs filename
-    # ggml General.file_type values (GGML_FTYPE_* in gguf.h). A wrong entry here does not
-    # fail loudly — it silently mislabels a quant, which then feeds the quant-vs-filename
-    # check. MOSTLY_BF16 is 32; 30 is IQ1_M.
-    ft_names = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0", 8: "Q5_0", 9: "Q5_1",
-                10: "Q2_K", 11: "Q3_K_S", 12: "Q3_K_M", 13: "Q3_K_L", 14: "Q4_K_S", 15: "Q4_K_M",
-                16: "Q5_K_S", 17: "Q5_K_M", 18: "Q6_K", 19: "IQ2_XXS", 20: "IQ2_XS", 21: "IQ3_XXS",
-                23: "IQ1_S", 24: "IQ4_NL", 25: "IQ3_S", 26: "IQ3_M", 27: "IQ2_S", 28: "IQ2_M",
-                29: "IQ4_XS", 30: "IQ1_M", 32: "BF16", 34: "TQ1_0", 35: "TQ2_0", 38: "MXFP4_MOE"}
-    fname_q = re.findall(r"(F16|BF16|Q8_0|Q6_K|Q5_K_M|Q5_K_S|Q4_K_M|Q4_K_S|Q3_K_[SML]|Q4_0|Q4_1|Q5_0|Q5_1|Q2_K|IQ\d_S?_?[XSML]*|MXFP4)",
+    # ggml General.file_type values (LLAMA_FTYPE_* in llama.h). Prefer the mapping
+    # shipped with the installed gguf package (it tracks upstream); fall back to a
+    # frozen copy verified against ggml-org/llama.cpp include/llama.h and the gguf
+    # package's own LlamaFileType enum (issue #2: the old hand-typed table was off
+    # by one for ids 21-31 — Q2_K_S/IQ3_XS had been dropped, shifting everything).
+    try:
+        from gguf.constants import LlamaFileType as _LFT
+        ft_names = {m.value: m.name.removeprefix("MOSTLY_").replace("ALL_", "")
+                    for m in _LFT if m.value not in (1024,)}  # 1024 = GUESSED
+        ft_names.pop(1024, None)
+    except Exception:  # no gguf installed — safetensors audits still need this? no,
+        # but keep a correct fallback so a partial install can't mislabel.
+        ft_names = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0", 8: "Q5_0", 9: "Q5_1",
+                    10: "Q2_K", 11: "Q3_K_S", 12: "Q3_K_M", 13: "Q3_K_L", 14: "Q4_K_S", 15: "Q4_K_M",
+                    16: "Q5_K_S", 17: "Q5_K_M", 18: "Q6_K", 19: "IQ2_XXS", 20: "IQ2_XS", 21: "Q2_K_S",
+                    22: "IQ3_XS", 23: "IQ3_XXS", 24: "IQ1_S", 25: "IQ4_NL", 26: "IQ3_S", 27: "IQ3_M",
+                    28: "IQ2_S", 29: "IQ2_M", 30: "IQ4_XS", 31: "IQ1_M", 32: "BF16",
+                    36: "TQ1_0", 37: "TQ2_0", 38: "MXFP4_MOE", 39: "NVFP4", 40: "Q1_0"}
+    fname_q = re.findall(r"(F16|BF16|Q8_0|Q6_K|Q5_K_M|Q5_K_S|Q4_K_M|Q4_K_S|Q3_K_[SML]|Q4_0|Q4_1|Q5_0|Q5_1|Q2_K|IQ\d[_]?[S]?_?[XSML]*|MXFP4|TQ1_0|TQ2_0|NVFP4|Q1_0)",
                          path.name.upper())
     # file_type arrives as a single-element list from the reader; unwrap ints from lists
     if isinstance(quant, list) and quant:
         quant = quant[0]
     if isinstance(quant, int) and quant in ft_names and fname_q:
-        claimed = fname_q[-1]
         actual = ft_names[quant]
-        if actual.upper() not in claimed and claimed not in actual:
-            rep.add("WARN", "meta", f"filename says {claimed} but metadata file_type is {actual}")
+        # Warn only if NO token in the filename matches the metadata name: names
+        # commonly state source AND target quants ("...-IQ2_XXS-fromBF16"), and the
+        # last-token comparison read the source as the claim (issue #2, comment 1).
+        # Underscores are ignored on both sides ("IQ2XXS" == "IQ2_XXS").
+        norm = lambda t: t.replace("_", "").upper()
+        a = norm(actual)
+        if all(norm(c) not in a and a not in norm(c) for c in fname_q):
+            rep.add("WARN", "meta", f"filename says {fname_q[-1]} but metadata file_type is {actual}")
     quant_label = ft_names.get(quant) if isinstance(quant, int) else None
     rep.add("INFO", "meta", f"quant={quant_label or 'unknown'}")
     for key in ("general.source.url", "general.base_model", "general.quantized_by"):

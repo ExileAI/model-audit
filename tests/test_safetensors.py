@@ -444,9 +444,16 @@ class TestQuantLabelTable(unittest.TestCase):
         from model_audit import check_meta
         src = inspect.getsource(check_meta)
         table = dict(re.findall(r"(\d+): \"([A-Z0-9_]+)\"", src))
+        # canonical LLAMA_FTYPE_* per llama.h / gguf LlamaFileType (issue #2 fixed
+        # the previous off-by-one here: 21-31 were shifted, 30 is IQ4_XS not IQ1_M)
         self.assertEqual(table.get("32"), "BF16", "MOSTLY_BF16 is 32")
-        self.assertEqual(table.get("30"), "IQ1_M", "30 is IQ1_M, not BF16")
+        self.assertEqual(table.get("30"), "IQ4_XS", "30 is IQ4_XS (llama.h)")
+        self.assertEqual(table.get("27"), "IQ3_M", "27 is IQ3_M (llama.h)")
+        self.assertEqual(table.get("21"), "Q2_K_S", "21 is Q2_K_S (llama.h)")
+        self.assertEqual(table.get("22"), "IQ3_XS", "22 is IQ3_XS (llama.h)")
+        self.assertEqual(table.get("31"), "IQ1_M", "31 is IQ1_M (llama.h)")
         self.assertEqual(table.get("38"), "MXFP4_MOE")
+        self.assertEqual(table.get("36"), "TQ1_0", "TQ1_0 is 36, not 34")
         for code in ("15", "18", "14"):  # Q4_K_M, Q6_K, Q4_K_S
             self.assertIn(code, table, f"file_type {code} missing from the label table")
 
